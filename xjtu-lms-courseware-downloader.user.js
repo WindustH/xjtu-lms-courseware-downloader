@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         西安交大LMS课件下载器
 // @namespace    https://github.com/WindustH/xjtu-lms-courseware-downloader
-// @version      4.0.0
+// @version      4.0.1
 // @description  自动下载西安交通大学LMS系统的课件文件，支持所有课件（包括无下载权限的）
 // @author       WindustH
 // @match        https://lms.xjtu.edu.cn/course/*/courseware*
@@ -450,7 +450,7 @@
                                         </span>
                                         ${attachment.hasDownload && !attachment.allowDownload ? `
                                             <span style="background: ${CONFIG.UI.COLORS.WARNING}; color: white;
-                                                   font-size: 9px; padding: 1px 4px; border-radius: 2px;">无版权警告</span>
+                                                   font-size: 9px; padding: 1px 4px; border-radius: 2px;">私有版权保护</span>
                                         ` : ''}
                                     </div>
                                     <div style="font-size: 11px; color: #999;">
