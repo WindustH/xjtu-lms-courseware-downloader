@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         西安交大LMS课件下载器
-// @namespace    http://tampermonkey.net/
+// @namespace    https://github.com/WindustH/xjtu-lms-courseware-downloader
 // @version      4.0.0
 // @description  自动下载西安交通大学LMS系统的课件文件，支持所有课件（包括无下载权限的）
-// @author       You
+// @author       WindustH
 // @match        https://lms.xjtu.edu.cn/course/*/courseware*
 // @run-at       document-end
+// @license MIT
 // ==/UserScript==
 
 (function() {
@@ -237,37 +238,19 @@
 
     const DownloadUrlFetcher = {
         /**
-         * 获取实际下载URL（通过重定向）
+         * 获取下载URL（直接使用API URL，避免重定向URL的时效性问题）
+         * 使用 reference_id 而不是 id，与页面中的下载链接保持一致
          */
-        getActualUrl(uploadId) {
-            return new Promise((resolve, reject) => {
-                if (!uploadId) {
-                    reject(new Error('uploadId 为空'));
-                    return;
-                }
+        getDownloadUrl(uploadInfo) {
+            if (!uploadInfo) {
+                return Promise.reject(new Error('uploadInfo 为空'));
+            }
 
-                const xhr = new XMLHttpRequest();
-                xhr.open('HEAD', `/api/uploads/${uploadId}/blob`, true);
-                xhr.timeout = CONFIG.TIMEOUTS.REQUEST_TIMEOUT;
-
-                xhr.onload = function() {
-                    if (xhr.status === 200) {
-                        const actualUrl = xhr.responseURL;
-                        if (actualUrl && actualUrl !== window.location.href) {
-                            Logger.info('获取下载链接:', uploadId, '->', actualUrl.substring(0, 50) + '...');
-                            resolve(actualUrl);
-                        } else {
-                            reject(new Error('未找到重定向URL'));
-                        }
-                    } else {
-                        reject(new Error(`HTTP ${xhr.status}`));
-                    }
-                };
-
-                xhr.onerror = () => reject(new Error('网络错误'));
-                xhr.ontimeout = () => reject(new Error('请求超时'));
-                xhr.send();
-            });
+            // 优先使用 reference_id，与页面中的下载链接一致
+            const id = uploadInfo.reference_id || uploadInfo.id;
+            const url = `/api/uploads/reference/${id}/blob`;
+            Logger.info('获取下载链接:', uploadInfo.name, '->', url);
+            return Promise.resolve(url);
         },
 
         /**
@@ -308,7 +291,7 @@
                 }
 
                 try {
-                    const downloadUrl = await this.getActualUrl(uploadInfo.id);
+                    const downloadUrl = await this.getDownloadUrl(uploadInfo);
                     attachments.push({
                         ...coursewareInfo,
                         fileName: uploadInfo.name || fileName,
