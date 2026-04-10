@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         西安交大LMS课件下载器
 // @namespace    https://github.com/WindustH/xjtu-lms-courseware-downloader
-// @version      4.5.0
+// @version      6.0.1
 // @description  自动下载西安交通大学LMS系统的课件文件，支持所有课件（包括无下载权限和时效性token的文件）
 // @author       WindustH
 // @match        https://lms.xjtu.edu.cn/course/*/courseware*
@@ -13,13 +13,14 @@
     'use strict';
 
     // ============================================
-    // 常量配置
+    // 常量定义
     // ============================================
 
-    const CONFIG = {
-        VERSION: '4.5.0',
+    const CONSTANTS = {
+        VERSION: '6.0.1',
         SCRIPT_NAME: 'LMS下载器',
-        // 选择器
+
+        // DOM 选择器
         SELECTORS: {
             COURSEWARE_ITEM: '.learning-activity.list-item',
             EXPAND_BTN: '.expand-collapse-attachments',
@@ -30,88 +31,84 @@
             FILE_NAME: '.file-name',
             FILE_EXT: '.file-extension'
         },
-        // 超时配置
+
+        // 超时配置 (ms)
         TIMEOUTS: {
             WAIT_ELEMENT: 15000,
             EXPAND_DELAY: 500,
-            REQUEST_TIMEOUT: 10000,
+            PREVIEW_LOAD_DELAY: 300,
             NOTIFICATION_DURATION: 3000,
-            DOWNLOAD_INTERVAL: 1500
+            DOWNLOAD_INTERVAL: 1500,
+            PAGE_READY: 30000,
+            ANGULAR_DATA: 10000,
+            DOCUMENT_URL: 5000
         },
-        // UI配置
-        UI: {
-            PANEL_WIDTH: 420,
-            PANEL_MAX_HEIGHT: '80vh',
-            Z_INDEX: 10000,
-            COLORS: {
-                PRIMARY: '#1e88e5',
-                PRIMARY_DARK: '#1565c0',
-                SUCCESS: '#4caf50',
-                ERROR: '#f44336',
-                WARNING: '#ff9800',
-                GRAY: '#e0e0e0',
-                LIGHT_GRAY: '#f5f5f5'
-            }
+
+        // 轮询间隔 (ms)
+        POLL_INTERVAL: {
+            FAST: 100,
+            NORMAL: 200,
+            SLOW: 500
+        },
+
+        // 重试配置
+        RETRY: {
+            FETCH_URL: 2
+        },
+
+        // 文件名限制
+        MAX_FILENAME_LENGTH: 200
+    };
+
+    // 颜色主题
+    const Theme = {
+        colors: {
+            primary: '#1e88e5',
+            primaryDark: '#1565c0',
+            success: '#4caf50',
+            error: '#f44336',
+            warning: '#ff9800',
+            gray: '#e0e0e0',
+            lightGray: '#f5f5f5'
+        },
+
+        gradients: {
+            button: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%)',
+            header: 'linear-gradient(135deg, #1e88e5 0%, #1565c0 100%)'
         }
     };
 
     // ============================================
-    // 日志系统
-    // ============================================
-
-    const Logger = {
-        PREFIX: `[${CONFIG.SCRIPT_NAME}]`,
-
-        info(...args) {
-            console.log(this.PREFIX, ...args);
-        },
-
-        error(...args) {
-            console.error(this.PREFIX, ...args);
-        },
-
-        warn(...args) {
-            console.warn(this.PREFIX, ...args);
-        }
-    };
-
-    // ============================================
-    // 工具类
+    // 核心工具模块
     // ============================================
 
     const Utils = {
-        /**
-         * 从URL中提取课程号
-         */
+        // 获取课程 ID
         getCourseId() {
             const match = window.location.pathname.match(/\/course\/(\d+)\//);
             return match ? match[1] : null;
         },
 
-        /**
-         * 安全获取元素文本
-         */
-        safeGetText(element, selector, defaultValue = '') {
-            try {
-                const el = element?.querySelector(selector);
-                return el?.textContent?.trim() || defaultValue;
-            } catch (e) {
-                Logger.warn('获取文本失败:', selector, e);
-                return defaultValue;
-            }
-        },
-
-        /**
-         * 延迟函数
-         */
+        // 延迟
         delay(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
         },
 
-        /**
-         * 等待元素出现
-         */
-        waitForElement(selector, timeout = CONFIG.TIMEOUTS.WAIT_ELEMENT) {
+        // 轮询
+        async poll(fn, condition, timeout, interval) {
+            const startTime = Date.now();
+            while (Date.now() - startTime < timeout) {
+                const result = fn();
+                if (condition(result)) {
+                    return result;
+                }
+                await this.delay(interval);
+            }
+            throw new Error(`轮询超时: ${timeout}ms`);
+        },
+
+        // 等待元素
+        waitForElement(selector, timeout = CONSTANTS.TIMEOUTS.WAIT_ELEMENT) {
             return new Promise((resolve, reject) => {
                 const element = document.querySelector(selector);
                 if (element) {
@@ -127,10 +124,7 @@
                     }
                 });
 
-                observer.observe(document.body, {
-                    childList: true,
-                    subtree: true
-                });
+                observer.observe(document.body, { childList: true, subtree: true });
 
                 setTimeout(() => {
                     observer.disconnect();
@@ -139,207 +133,241 @@
             });
         },
 
-        /**
-         * 清理文件名中的非法字符
-         */
+        // 安全获取文本
+        safeGetText(element, selector, defaultValue = '') {
+            try {
+                const el = element?.querySelector(selector);
+                return el?.textContent?.trim() || defaultValue;
+            } catch (e) {
+                Logger.warn('获取文本失败:', selector, e);
+                return defaultValue;
+            }
+        },
+
+        // 清理文件名
         sanitizeFilename(filename) {
             return filename
                 .replace(/[<>:"/\\|?*]/g, '_')
                 .replace(/\s+/g, '_')
-                .substring(0, 200);
+                .substring(0, CONSTANTS.MAX_FILENAME_LENGTH);
+        },
+
+        // 转义 HTML
+        escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    };
+
+    // 日志模块
+    const Logger = {
+        PREFIX: `[${CONSTANTS.SCRIPT_NAME}]`,
+
+        info(...args) {
+            console.log(this.PREFIX, ...args);
+        },
+
+        error(...args) {
+            console.error(this.PREFIX, ...args);
+        },
+
+        warn(...args) {
+            console.warn(this.PREFIX, ...args);
         }
     };
 
     // ============================================
-    // 课件信息提取器
+    // DOM 操作模块
     // ============================================
 
-    const CoursewareExtractor = {
-        /**
-         * 展开课件附件
-         */
-        async expandAttachments(container) {
-            try {
-                const expandBtn = container.querySelector(CONFIG.SELECTORS.EXPAND_BTN);
-                if (!expandBtn) return false;
+    const DOMHelper = {
+        find(selector, parent = document) {
+            return parent.querySelector(selector);
+        },
 
-                const isExpanded = expandBtn.textContent.includes('收起');
-                if (!isExpanded) {
-                    expandBtn.click();
-                    await Utils.delay(CONFIG.TIMEOUTS.EXPAND_DELAY);
-                    return true;
-                }
-                return false;
-            } catch (e) {
-                Logger.error('展开附件失败:', e);
-                return false;
+        findAll(selector, parent = document) {
+            return parent.querySelectorAll(selector);
+        },
+
+        create(tag, options = {}) {
+            const element = document.createElement(tag);
+
+            if (options.style) {
+                element.style.cssText = options.style;
             }
+            if (options.textContent) {
+                element.textContent = options.textContent;
+            }
+            if (options.innerHTML) {
+                element.innerHTML = options.innerHTML;
+            }
+            if (options.id) {
+                element.id = options.id;
+            }
+            if (options.className) {
+                element.className = options.className;
+            }
+
+            Object.entries(options.attributes || {}).forEach(([key, value]) => {
+                element.setAttribute(key, value);
+            });
+
+            return element;
         },
 
-        /**
-         * 获取课件基本信息
-         */
-        getCoursewareInfo(container) {
-            return {
-                name: Utils.safeGetText(container, CONFIG.SELECTORS.ACTIVITY_TITLE, '未命名课件'),
-                module: Utils.safeGetText(container, CONFIG.SELECTORS.MODULE),
-                size: Utils.safeGetText(container, CONFIG.SELECTORS.SIZE)
-            };
+        on(element, event, handler) {
+            element.addEventListener(event, handler);
+        }
+    };
+
+    // ============================================
+    // 数据访问层
+    // ============================================
+
+    const DataProvider = {
+        // 检查 Angular 是否就绪
+        isAngularReady() {
+            return typeof angular !== 'undefined';
         },
 
-        /**
-         * 获取所有附件行
-         */
-        getAllAttachmentRows(container) {
-            return container.querySelectorAll(CONFIG.SELECTORS.ATTACHMENT_ROW);
-        },
-
-        /**
-         * 获取文件名（从附件行中提取）
-         */
-        getFileName(attachmentRow) {
-            const fileName = Utils.safeGetText(attachmentRow, CONFIG.SELECTORS.FILE_NAME);
-            const fileExt = Utils.safeGetText(attachmentRow, CONFIG.SELECTORS.FILE_EXT);
-            return fileName + fileExt;
-        },
-
-        /**
-         * 获取附件大小
-         */
-        getFileSize(attachmentRow) {
-            return Utils.safeGetText(attachmentRow, CONFIG.SELECTORS.SIZE);
-        },
-
-        /**
-         * 从 Angular scope 获取 upload 信息
-         */
+        // 获取上传信息
         getUploadInfo(attachmentRow) {
             try {
-                if (!attachmentRow) return null;
-
-                // 检查 Angular 是否可用
-                if (typeof angular === 'undefined') {
-                    Logger.warn('Angular 未加载');
+                if (!attachmentRow || !this.isAngularReady()) {
                     return null;
                 }
-
                 const scope = angular.element(attachmentRow).scope();
                 return scope?.upload || null;
             } catch (e) {
-                Logger.error('获取 upload info 失败:', e);
+                Logger.error('获取上传信息失败:', e);
                 return null;
             }
+        },
+
+        // 等待 Angular 数据加载
+        async waitForAngularData(container, getAttachmentRows) {
+            const startTime = Date.now();
+
+            while (Date.now() - startTime < CONSTANTS.TIMEOUTS.ANGULAR_DATA) {
+                if (!this.isAngularReady()) {
+                    await Utils.delay(CONSTANTS.POLL_INTERVAL.NORMAL);
+                    continue;
+                }
+
+                const rows = getAttachmentRows(container);
+                if (rows.length === 0) {
+                    await Utils.delay(CONSTANTS.POLL_INTERVAL.NORMAL);
+                    continue;
+                }
+
+                const firstUpload = this.getUploadInfo(rows[0]);
+                if (firstUpload) {
+                    return true;
+                }
+
+                await Utils.delay(CONSTANTS.POLL_INTERVAL.NORMAL);
+            }
+
+            throw new Error('Angular 数据加载超时');
+        },
+
+        // 获取文档 URL
+        async fetchDocumentUrl(attachmentRow) {
+            attachmentRow.click();
+
+            try {
+                const updatedInfo = await Utils.poll(
+                    () => this.getUploadInfo(attachmentRow),
+                    (info) => info?.documentUrl && info.documentUrl.includes('file='),
+                    CONSTANTS.TIMEOUTS.DOCUMENT_URL,
+                    CONSTANTS.POLL_INTERVAL.FAST
+                );
+
+                if (updatedInfo?.documentUrl) {
+                    const match = updatedInfo.documentUrl.match(/[?&]file=([^&]+)/);
+                    if (match) {
+                        return decodeURIComponent(match[1]);
+                    }
+                }
+            } catch (e) {
+                Logger.error('获取文档 URL 超时:', e.message);
+            }
+
+            return null;
+        },
+
+        // 关闭预览窗口
+        closePreview() {
+            const selectors = [
+                '.modal-header .close',
+                '.modal-footer .btn-default',
+                '[ng-click*="close"]',
+                '[ng-click*="cancel"]'
+            ];
+
+            for (const selector of selectors) {
+                const btn = DOMHelper.find(selector);
+                if (btn) {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
         }
     };
 
     // ============================================
-    // 下载链接获取器
+    // 业务逻辑层
     // ============================================
 
-    const DownloadUrlFetcher = {
-        /**
-         * 获取下载URL
-         * 1. 如果 allow_download=false 且有 documentUrl，从 documentUrl 提取实际下载链接
-         * 2. 否则使用 API URL，使用 reference_id 而不是 id
-         *
-         * 注意：documentUrl 中的 token 有时效性，建议在下载时实时获取
-         */
-        getDownloadUrl(uploadInfo) {
-            if (!uploadInfo) {
-                return Promise.reject(new Error('uploadInfo 为空'));
-            }
+    const CoursewareService = {
+        // 展开课件项
+        async expandItem(container) {
+            const btn = DOMHelper.find(CONSTANTS.SELECTORS.EXPAND_BTN, container);
+            if (!btn) return false;
 
-            // 情况1: allow_download=false，但提供了 documentUrl（包含实际的媒体服务器下载链接）
-            if (uploadInfo.allow_download === false && uploadInfo.documentUrl) {
-                try {
-                    // documentUrl 格式: /note-bene/pdf-viewer?file=URL_ENCODED_DOWNLOAD_URL&...
-                    // 从中提取 file 参数
-                    const match = uploadInfo.documentUrl.match(/[?&]file=([^&]+)/);
-                    if (match) {
-                        const actualUrl = decodeURIComponent(match[1]);
-                        Logger.info('获取下载链接 (documentUrl):', uploadInfo.name, '->', actualUrl.substring(0, 80) + '...');
-                        return Promise.resolve(actualUrl);
-                    }
-                } catch (e) {
-                    Logger.warn('解析 documentUrl 失败:', e);
-                }
+            const isExpanded = btn.textContent.includes('收起');
+            if (!isExpanded) {
+                btn.click();
+                await Utils.delay(CONSTANTS.TIMEOUTS.EXPAND_DELAY);
+                return true;
             }
-
-            // 情况2: 正常下载，使用 API URL
-            // 优先使用 reference_id，与页面中的下载链接一致
-            const id = uploadInfo.reference_id || uploadInfo.id;
-            const url = `/api/uploads/reference/${id}/blob`;
-            Logger.info('获取下载链接 (API):', uploadInfo.name, '->', url);
-            return Promise.resolve(url);
+            return false;
         },
 
-        /**
-         * 实时获取下载URL（用于 allow_download=false 的文件）
-         * 通过点击附件触发 documentUrl 加载，然后提取链接并关闭预览
-         */
-        async getFreshDownloadUrl(uploadId) {
-            try {
-                // 在页面上查找对应的 upload
-                const attachmentRows = document.querySelectorAll(CONFIG.SELECTORS.ATTACHMENT_ROW);
-                for (const row of attachmentRows) {
-                    const uploadInfo = CoursewareExtractor.getUploadInfo(row);
-                    if (uploadInfo && uploadInfo.id === uploadId) {
-                        // 点击附件触发 documentUrl 加载
-                        row.click();
-                        await Utils.delay(300); // 等待 documentUrl 加载
-
-                        // 重新获取 upload 信息（现在应该有 documentUrl 了）
-                        const updatedInfo = CoursewareExtractor.getUploadInfo(row);
-                        if (updatedInfo && updatedInfo.documentUrl) {
-                            const match = updatedInfo.documentUrl.match(/[?&]file=([^&]+)/);
-                            if (match) {
-                                const url = decodeURIComponent(match[1]);
-
-                                // 关闭预览窗口
-                                this.closePreview();
-
-                                return url;
-                            }
-                        }
-
-                        // 如果没有找到 documentUrl，关闭预览
-                        this.closePreview();
-                    }
-                }
-                return null;
-            } catch (e) {
-                Logger.error('获取实时下载链接失败:', e);
-                this.closePreview();
-                return null;
-            }
+        // 获取课件信息
+        getItemInfo(container) {
+            return {
+                name: Utils.safeGetText(container, CONSTANTS.SELECTORS.ACTIVITY_TITLE, '未命名课件'),
+                module: Utils.safeGetText(container, CONSTANTS.SELECTORS.MODULE),
+                size: Utils.safeGetText(container, CONSTANTS.SELECTORS.SIZE)
+            };
         },
 
-        /**
-         * 关闭预览窗口
-         */
-        closePreview() {
-            try {
-                // 查找并点击关闭按钮
-                const closeBtn = document.querySelector('.modal-header .close, .modal-footer .btn-default, [ng-click*="close"], [ng-click*="cancel"]');
-                if (closeBtn) {
-                    closeBtn.click();
-                    Utils.delay(100);
-                }
-            } catch (e) {
-                Logger.warn('关闭预览窗口失败:', e);
-            }
+        // 获取附件行
+        getAttachmentRows(container) {
+            return DOMHelper.findAll(CONSTANTS.SELECTORS.ATTACHMENT_ROW, container);
         },
 
-        /**
-         * 获取课件的所有附件下载信息
-         */
-        async fetchAllCoursewareAttachments(container) {
-            const coursewareInfo = CoursewareExtractor.getCoursewareInfo(container);
-            const attachmentRows = CoursewareExtractor.getAllAttachmentRows(container);
+        // 获取附件信息
+        getAttachmentInfo(attachmentRow) {
+            return {
+                fileName: Utils.safeGetText(attachmentRow, CONSTANTS.SELECTORS.FILE_NAME) +
+                          Utils.safeGetText(attachmentRow, CONSTANTS.SELECTORS.FILE_EXT),
+                fileSize: Utils.safeGetText(attachmentRow, CONSTANTS.SELECTORS.SIZE),
+                uploadInfo: DataProvider.getUploadInfo(attachmentRow)
+            };
+        },
 
-            if (attachmentRows.length === 0) {
+        // 收集附件
+        async collectAttachments(container) {
+            const itemInfo = this.getItemInfo(container);
+            const rows = Array.from(this.getAttachmentRows(container));
+
+            if (rows.length === 0) {
                 return [{
-                    ...coursewareInfo,
+                    ...itemInfo,
                     fileName: '',
                     downloadUrl: null,
                     hasDownload: false,
@@ -347,348 +375,374 @@
                 }];
             }
 
-            const attachments = [];
+            return await Promise.all(rows.map(async (row) => {
+                const info = this.getAttachmentInfo(row);
+                return this.createAttachment(itemInfo, info);
+            }));
+        },
 
-            for (let i = 0; i < attachmentRows.length; i++) {
-                const attachmentRow = attachmentRows[i];
-                const fileName = CoursewareExtractor.getFileName(attachmentRow);
-                const fileSize = CoursewareExtractor.getFileSize(attachmentRow);
-                const uploadInfo = CoursewareExtractor.getUploadInfo(attachmentRow);
+        // 创建附件对象
+        createAttachment(itemInfo, attachmentInfo) {
+            const uploadInfo = attachmentInfo.uploadInfo;
+            const isNoDownload = uploadInfo?.allow_download === false;
 
-                if (!uploadInfo || !uploadInfo.id) {
-                    attachments.push({
-                        ...coursewareInfo,
-                        fileName,
-                        size: fileSize,
-                        downloadUrl: null,
-                        hasDownload: false,
-                        error: '未找到文件信息'
-                    });
-                    continue;
-                }
+            const attachment = {
+                ...itemInfo,
+                fileName: uploadInfo?.name || attachmentInfo.fileName,
+                size: attachmentInfo.fileSize,
+                downloadUrl: null,
+                hasDownload: !!uploadInfo,
+                allowDownload: uploadInfo?.allow_download || false,
+                uploadId: uploadInfo?.id,
+                needsFreshUrl: isNoDownload,
+                error: !uploadInfo ? '未找到文件信息' : null
+            };
 
-                const isNoDownload = uploadInfo.allow_download === false;
-
+            // 如果有上传信息且不需要获取 URL，则设置下载链接
+            if (uploadInfo && !isNoDownload) {
                 try {
-                    let downloadUrl;
-                    if (isNoDownload) {
-                        // 对于无下载权限的文件，暂不获取链接，下载时实时获取
-                        downloadUrl = null;
-                    } else {
-                        downloadUrl = await this.getDownloadUrl(uploadInfo);
-                    }
-
-                    attachments.push({
-                        ...coursewareInfo,
-                        fileName: uploadInfo.name || fileName,
-                        size: fileSize,
-                        downloadUrl,
-                        hasDownload: true,
-                        allowDownload: uploadInfo.allow_download || false,
-                        uploadId: uploadInfo.id,
-                        needsFreshUrl: isNoDownload
-                    });
+                    attachment.downloadUrl = this.getDownloadUrl(uploadInfo);
                 } catch (e) {
-                    Logger.error('获取下载链接失败:', uploadInfo.id, e.message);
-                    attachments.push({
-                        ...coursewareInfo,
-                        fileName,
-                        size: fileSize,
-                        downloadUrl: null,
-                        hasDownload: false,
-                        error: e.message
-                    });
+                    attachment.error = e.message;
+                    attachment.hasDownload = false;
                 }
             }
 
-            return attachments;
+            return attachment;
+        },
+
+        // 获取下载链接
+        getDownloadUrl(uploadInfo) {
+            if (!uploadInfo) {
+                throw new Error('上传信息为空');
+            }
+
+            // 尝试从 documentUrl 解析
+            if (uploadInfo.allow_download === false && uploadInfo.documentUrl) {
+                const match = uploadInfo.documentUrl.match(/[?&]file=([^&]+)/);
+                if (match) {
+                    return decodeURIComponent(match[1]);
+                }
+            }
+
+            // 使用 API 链接
+            const id = uploadInfo.reference_id || uploadInfo.id;
+            return `/api/uploads/reference/${id}/blob`;
+        },
+
+        // 获取新的下载链接
+        async fetchFreshDownloadUrl(uploadId) {
+            for (let attempt = 0; attempt <= CONSTANTS.RETRY.FETCH_URL; attempt++) {
+                if (attempt > 0) {
+                    Logger.info(`重试获取下载链接 (${attempt}/${CONSTANTS.RETRY.FETCH_URL})`);
+                    await Utils.delay(500);
+                }
+
+                const rows = Array.from(this.getAttachmentRows(document));
+                for (const row of rows) {
+                    const uploadInfo = DataProvider.getUploadInfo(row);
+                    if (uploadInfo?.id === uploadId) {
+                        const url = await DataProvider.fetchDocumentUrl(row);
+                        DataProvider.closePreview();
+
+                        if (url) {
+                            return url;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            Logger.error('获取下载链接失败');
+            return null;
         }
     };
 
     // ============================================
-    // UI 组件
+    // UI 层
     // ============================================
 
-    const UI = {
-        /**
-         * 创建通知
-         */
+    const UIManager = {
+        // 显示通知
         showNotification(message, type = 'info') {
-            const notification = document.createElement('div');
-            const bgColor = type === 'error' ? CONFIG.UI.COLORS.ERROR : CONFIG.UI.COLORS.SUCCESS;
+            const colors = {
+                error: Theme.colors.error,
+                success: Theme.colors.success,
+                info: Theme.colors.success
+            };
 
-            notification.style.cssText = `
-                position: fixed;
-                top: 80px;
-                right: 20px;
-                background: ${bgColor};
-                color: white;
-                padding: 15px 20px;
-                border-radius: 6px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-                z-index: ${CONFIG.UI.Z_INDEX + 1};
-                font-size: 14px;
-                font-family: Arial, sans-serif;
-            `;
-            notification.textContent = message;
+            const notification = DOMHelper.create('div', {
+                style: `
+                    position: fixed;
+                    top: 80px;
+                    right: 20px;
+                    background: ${colors[type] || colors.info};
+                    color: white;
+                    padding: 15px 20px;
+                    border-radius: 6px;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+                    z-index: 10001;
+                    font-size: 14px;
+                    font-family: Arial, sans-serif;
+                `,
+                textContent: message
+            });
+
             document.body.appendChild(notification);
-
-            setTimeout(() => {
-                notification.remove();
-            }, CONFIG.TIMEOUTS.NOTIFICATION_DURATION);
+            setTimeout(() => notification.remove(), CONSTANTS.TIMEOUTS.NOTIFICATION_DURATION);
         },
 
-        /**
-         * 创建主按钮
-         */
+        // 创建主按钮
         createMainButton(onClick) {
-            const button = document.createElement('button');
-            button.id = 'xjtu-fetch-courses-btn';
-            button.innerHTML = '📥 获取课件下载链接';
-            button.style.cssText = `
-                position: fixed;
-                bottom: 30px;
-                right: 30px;
-                background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
-                color: white;
-                border: none;
-                padding: 15px 25px;
-                border-radius: 30px;
-                font-size: 16px;
-                font-weight: bold;
-                cursor: pointer;
-                box-shadow: 0 4px 15px rgba(238, 90, 111, 0.4);
-                z-index: ${CONFIG.UI.Z_INDEX - 1};
-                transition: all 0.3s ease;
-            `;
+            const button = DOMHelper.create('button', {
+                id: 'xjtu-main-button',
+                style: `
+                    position: fixed;
+                    bottom: 30px;
+                    right: 30px;
+                    background: ${Theme.gradients.button};
+                    color: white;
+                    border: none;
+                    padding: 15px 25px;
+                    border-radius: 30px;
+                    font-size: 16px;
+                    font-weight: bold;
+                    cursor: pointer;
+                    box-shadow: 0 4px 15px rgba(238, 90, 111, 0.4);
+                    z-index: 9999;
+                    transition: all 0.3s ease;
+                `,
+                textContent: '📥 获取课件下载链接'
+            });
 
             button.onmouseover = () => button.style.transform = 'translateY(-2px)';
             button.onmouseout = () => button.style.transform = 'translateY(0)';
-            button.onclick = onClick;
+            DOMHelper.on(button, 'click', onClick);
 
             return button;
         },
 
-        /**
-         * 更新按钮状态
-         */
-        updateButtonState(button, text, disabled = false) {
+        // 更新主按钮
+        updateMainButton(button, text, disabled = false) {
             if (button) {
                 button.disabled = disabled;
-                button.innerHTML = text;
+                button.textContent = text;
             }
         },
 
-        /**
-         * 创建下载面板
-         */
-        createDownloadPanel(coursewareGroups, onDownload, onDownloadAll, onCopy) {
-            // 移除旧面板
-            const oldPanel = document.getElementById('xjtu-download-panel');
-            if (oldPanel) oldPanel.remove();
+        // 创建下载面板
+        createDownloadPanel(coursewareGroups, handlers) {
+            this.removeDownloadPanel();
 
-            const panel = document.createElement('div');
-            panel.id = 'xjtu-download-panel';
-            panel.style.cssText = `
-                position: fixed;
-                top: 20px;
-                right: 20px;
-                width: ${CONFIG.UI.PANEL_WIDTH}px;
-                max-height: ${CONFIG.UI.PANEL_MAX_HEIGHT};
-                background: white;
-                border: 2px solid ${CONFIG.UI.COLORS.PRIMARY};
-                border-radius: 8px;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-                z-index: ${CONFIG.UI.Z_INDEX};
-                font-family: Arial, sans-serif;
-                overflow: hidden;
-            `;
+            const panel = DOMHelper.create('div', {
+                id: 'xjtu-download-panel',
+                style: `
+                    position: fixed;
+                    top: 20px;
+                    right: 20px;
+                    width: 420px;
+                    max-height: 80vh;
+                    background: white;
+                    border: 2px solid ${Theme.colors.primary};
+                    border-radius: 8px;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                    z-index: 10000;
+                    font-family: Arial, sans-serif;
+                    overflow: hidden;
+                `
+            });
 
-            const courseId = Utils.getCourseId();
-            const downloadableCount = coursewareGroups.reduce((sum, group) =>
-                sum + group.attachments.filter(a => a.hasDownload).length, 0);
-            const noPermissionCount = coursewareGroups.reduce((sum, group) =>
-                sum + group.attachments.filter(a => a.hasDownload && !a.allowDownload).length, 0);
-
-            panel.innerHTML = this.generatePanelHTML(coursewareGroups, courseId, downloadableCount, noPermissionCount);
+            panel.innerHTML = this.renderPanel(coursewareGroups);
             document.body.appendChild(panel);
-
-            this.bindPanelEvents(panel, coursewareGroups, onDownload, onDownloadAll, onCopy, downloadableCount);
+            this.bindPanelEvents(panel, handlers);
         },
 
-        /**
-         * 生成面板HTML（层级结构）
-         */
-        generatePanelHTML(coursewareGroups, courseId, downloadableCount, noPermissionCount) {
-            // 计算总文件数
-            const totalFiles = coursewareGroups.reduce((sum, group) => sum + group.attachments.length, 0);
+        // 移除下载面板
+        removeDownloadPanel() {
+            const existingPanel = DOMHelper.find('#xjtu-download-panel');
+            if (existingPanel) {
+                existingPanel.remove();
+            }
+        },
 
-            const itemsHTML = coursewareGroups.map((group, groupIndex) => {
-                const attachmentsHTML = group.attachments.map((attachment, attachmentIndex) => {
-                    const dataIndex = `${groupIndex}-${attachmentIndex}`;
-                    return `
-                        <div class="attachment-item" style="padding: 8px; margin-top: 8px;
-                                border: 1px solid ${CONFIG.UI.COLORS.GRAY}; border-radius: 4px;
-                                background: white; ${attachment.hasDownload ? '' : 'opacity: 0.6;'}">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div style="flex: 1; min-width: 0;">
-                                    <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 2px;">
-                                        <span style="font-size: 13px; color: #333;">
-                                            ${this.escapeHtml(attachment.fileName || attachment.name)}
-                                        </span>
-                                        ${attachment.hasDownload && !attachment.allowDownload ? `
-                                            <span style="background: ${CONFIG.UI.COLORS.WARNING}; color: white;
-                                                   font-size: 9px; padding: 1px 4px; border-radius: 2px;">私有版权保护</span>
-                                        ` : ''}
-                                    </div>
-                                    <div style="font-size: 11px; color: #999;">
-                                        ${attachment.size ? `📦 ${this.escapeHtml(attachment.size)}` : ''}
-                                    </div>
-                                    ${attachment.error ? `<div style="font-size: 10px; color: ${CONFIG.UI.COLORS.ERROR};">❌ ${this.escapeHtml(attachment.error)}</div>` : ''}
-                                </div>
-                                <div style="margin-left: 10px;">
-                                    ${attachment.hasDownload
-                                        ? `<button class="download-single" data-index="${dataIndex}"
-                                                   style="background: ${CONFIG.UI.COLORS.SUCCESS}; color: white;
-                                                          border: none; padding: 4px 8px; border-radius: 3px;
-                                                          cursor: pointer; font-size: 11px;">
-                                                    ⬇ 下载
-                                           </button>`
-                                        : `<span style="color: ${CONFIG.UI.COLORS.ERROR}; font-size: 11px;">❌</span>`
-                                    }
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }).join('');
-
-                const downloadableInGroup = group.attachments.filter(a => a.hasDownload).length;
-
-                return `
-                    <div class="courseware-group" style="padding: 10px; margin-bottom: 15px;
-                            border: 1px solid ${CONFIG.UI.COLORS.PRIMARY}; border-radius: 8px;
-                            background: #f8f9fa;">
-                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding-bottom: 8px;
-                                border-bottom: 1px solid ${CONFIG.UI.COLORS.GRAY};">
-                            <div style="background: ${CONFIG.UI.COLORS.PRIMARY}; color: white;
-                                    width: 24px; height: 24px; border-radius: 50%;
-                                    display: flex; align-items: center; justify-content: center;
-                                    font-size: 12px; font-weight: bold;">
-                                ${groupIndex + 1}
-                            </div>
-                            <div style="flex: 1;">
-                                <div style="font-weight: bold; color: #333; font-size: 14px;">
-                                    ${this.escapeHtml(group.name)}
-                                </div>
-                                <div style="font-size: 11px; color: #666;">
-                                    ${group.module ? `📖 ${this.escapeHtml(group.module)}` : ''}
-                                    <span style="margin-left: 8px;">📎 ${group.attachments.length} 个文件</span>
-                                    <span style="margin-left: 8px;">⬇ 可下载 ${downloadableInGroup} 个</span>
-                                </div>
-                            </div>
-                            <button class="download-group" data-group="${groupIndex}"
-                                    style="background: ${CONFIG.UI.COLORS.SUCCESS}; color: white;
-                                           border: none; padding: 5px 10px; border-radius: 4px;
-                                           cursor: pointer; font-size: 12px; font-weight: bold;">
-                                下载本组
-                            </button>
-                        </div>
-                        ${attachmentsHTML}
-                    </div>
-                `;
-            }).join('');
+        // 渲染面板
+        renderPanel(groups) {
+            const stats = this.calculateStats(groups);
 
             return `
-                <div style="background: linear-gradient(135deg, ${CONFIG.UI.COLORS.PRIMARY} 0%, ${CONFIG.UI.COLORS.PRIMARY_DARK} 100%);
+                ${this.renderPanelHeader(stats)}
+                ${this.renderPanelBody(groups)}
+                ${this.renderPanelFooter(stats)}
+            `;
+        },
+
+        // 计算统计
+        calculateStats(groups) {
+            return {
+                courseId: Utils.getCourseId(),
+                totalItems: groups.length,
+                totalFiles: groups.reduce((sum, g) => sum + g.attachments.length, 0),
+                downloadableCount: groups.reduce((sum, g) => sum + g.attachments.filter(a => a.hasDownload).length, 0),
+                noPermissionCount: groups.reduce((sum, g) => sum + g.attachments.filter(a => a.hasDownload && !a.allowDownload).length, 0)
+            };
+        },
+
+        // 渲染面板头部
+        renderPanelHeader(stats) {
+            return `
+                <div style="background: ${Theme.gradients.header};
                         color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
                     <div>
-                        <div style="font-size: 18px; font-weight: bold;">📚 课件下载器 v${CONFIG.VERSION}</div>
-                        <div style="font-size: 12px; opacity: 0.9;">课程: ${courseId} | ${coursewareGroups.length} 个课件项 | ${totalFiles} 个文件</div>
+                        <div style="font-size: 18px; font-weight: bold;">📚 课件下载器 v${CONSTANTS.VERSION}</div>
+                        <div style="font-size: 12px; opacity: 0.9;">
+                            课程: ${stats.courseId} | ${stats.totalItems} 个课件项 | ${stats.totalFiles} 个文件
+                        </div>
                     </div>
-                    <button id="close-panel" style="background: rgba(255,255,255,0.2); border: none;
+                    <button id="close-panel-btn" style="background: rgba(255,255,255,0.2); border: none;
                             color: white; font-size: 20px; cursor: pointer;
                             padding: 5px 10px; border-radius: 4px;">✕</button>
                 </div>
-                <div style="padding: 15px; max-height: 50vh; overflow-y: auto;">
-                    ${itemsHTML}
-                </div>
-                <div style="padding: 15px; border-top: 1px solid ${CONFIG.UI.COLORS.GRAY};
-                        background: ${CONFIG.UI.COLORS.LIGHT_GRAY};">
-                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-                        <button id="download-all" style="flex: 1; background: ${CONFIG.UI.COLORS.SUCCESS}; color: white;
-                                border: none; padding: 12px; border-radius: 6px; cursor: pointer;
-                                font-size: 14px; font-weight: bold;">
-                            ⬇ 下载全部 (${downloadableCount})
-                        </button>
-                        <button id="copy-all" style="flex: 1; background: ${CONFIG.UI.COLORS.PRIMARY}; color: white;
-                                border: none; padding: 12px; border-radius: 6px; cursor: pointer;
-                                font-size: 14px; font-weight: bold;">
-                            📋 复制链接
-                        </button>
+            `;
+        },
+
+        // 渲染面板主体
+        renderPanelBody(groups) {
+            const itemsHTML = groups.map((group, gi) => this.renderGroup(group, gi)).join('');
+            return `<div style="padding: 15px; max-height: 50vh; overflow-y: auto;">${itemsHTML}</div>`;
+        },
+
+        // 渲染组
+        renderGroup(group, index) {
+            const attachmentsHTML = group.attachments.map((att, ai) => this.renderAttachment(att, index, ai)).join('');
+            const downloadableCount = group.attachments.filter(a => a.hasDownload).length;
+
+            return `
+                <div style="padding: 10px; margin-bottom: 15px;
+                        border: 1px solid ${Theme.colors.primary}; border-radius: 8px; background: #f8f9fa;">
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding-bottom: 8px;
+                            border-bottom: 1px solid ${Theme.colors.gray};">
+                        <div style="background: ${Theme.colors.primary}; color: white;
+                                width: 24px; height: 24px; border-radius: 50%;
+                                display: flex; align-items: center; justify-content: center;
+                                font-size: 12px; font-weight: bold;">${index + 1}</div>
+                        <div style="flex: 1;">
+                            <div style="font-weight: bold; color: #333; font-size: 14px;">${Utils.escapeHtml(group.name)}</div>
+                            <div style="font-size: 11px; color: #666;">
+                                ${group.module ? `📖 ${Utils.escapeHtml(group.module)}` : ''}
+                                <span style="margin-left: 8px;">📎 ${group.attachments.length} 个文件</span>
+                                <span style="margin-left: 8px;">⬇ 可下载 ${downloadableCount} 个</span>
+                            </div>
+                        </div>
+                        <button class="download-group-btn" data-group="${index}"
+                                style="background: ${Theme.colors.success}; color: white; border: none;
+                                       padding: 5px 10px; border-radius: 4px; cursor: pointer;
+                                       font-size: 12px; font-weight: bold;">下载本组</button>
                     </div>
-                    ${noPermissionCount > 0 ? `
-                        <div style="font-size: 11px; color: ${CONFIG.UI.COLORS.WARNING}; text-align: center;">
-                            ⚠️ ${noPermissionCount} 个课件通过技术手段获取，请合理使用
+                    ${attachmentsHTML}
+                </div>
+            `;
+        },
+
+        // 渲染附件
+        renderAttachment(attachment, groupIndex, attachIndex) {
+            const dataIndex = `${groupIndex}-${attachIndex}`;
+            return `
+                <div style="padding: 8px; margin-top: 8px;
+                        border: 1px solid ${Theme.colors.gray}; border-radius: 4px;
+                        background: white; ${attachment.hasDownload ? '' : 'opacity: 0.6;'}">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="flex: 1; min-width: 0;">
+                            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 2px;">
+                                <span style="font-size: 13px; color: #333;">${Utils.escapeHtml(attachment.fileName || attachment.name)}</span>
+                                ${attachment.hasDownload && !attachment.allowDownload ? `
+                                    <span style="background: ${Theme.colors.warning}; color: white;
+                                           font-size: 9px; padding: 1px 4px; border-radius: 2px;">私有版权保护</span>
+                                ` : ''}
+                            </div>
+                            <div style="font-size: 11px; color: #999;">
+                                ${attachment.size ? `📦 ${Utils.escapeHtml(attachment.size)}` : ''}
+                            </div>
+                            ${attachment.error ? `<div style="font-size: 10px; color: ${Theme.colors.error};">❌ ${Utils.escapeHtml(attachment.error)}</div>` : ''}
+                        </div>
+                        <div style="margin-left: 10px;">
+                            ${attachment.hasDownload
+                                ? `<button class="download-single-btn" data-index="${dataIndex}"
+                                           style="background: ${Theme.colors.success}; color: white;
+                                                  border: none; padding: 4px 8px; border-radius: 3px;
+                                                  cursor: pointer; font-size: 11px;">⬇ 下载</button>`
+                                : `<span style="color: ${Theme.colors.error}; font-size: 11px;">❌</span>`
+                            }
+                        </div>
+                    </div>
+                </div>
+            `;
+        },
+
+        // 渲染面板底部
+        renderPanelFooter(stats) {
+            return `
+                <div style="padding: 15px; border-top: 1px solid ${Theme.colors.gray}; background: ${Theme.colors.lightGray};">
+                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <button id="download-all-btn" style="flex: 1; background: ${Theme.colors.success}; color: white;
+                                border: none; padding: 12px; border-radius: 6px; cursor: pointer;
+                                font-size: 14px; font-weight: bold;">⬇ 下载全部 (${stats.downloadableCount})</button>
+                        <button id="copy-all-btn" style="flex: 1; background: ${Theme.colors.primary}; color: white;
+                                border: none; padding: 12px; border-radius: 6px; cursor: pointer;
+                                font-size: 14px; font-weight: bold;">📋 复制链接</button>
+                    </div>
+                    ${stats.noPermissionCount > 0 ? `
+                        <div style="font-size: 11px; color: ${Theme.colors.warning}; text-align: center;">
+                            ⚠️ ${stats.noPermissionCount} 个课件通过技术手段获取，请合理使用
                         </div>
                     ` : ''}
                 </div>
             `;
         },
 
-        /**
-         * 绑定面板事件
-         */
-        bindPanelEvents(panel, coursewareGroups, onDownload, onDownloadAll, onCopy, downloadableCount) {
+        // 绑定面板事件
+        bindPanelEvents(panel, handlers) {
             // 关闭按钮
-            panel.querySelector('#close-panel').addEventListener('click', () => panel.remove());
+            const closeBtn = DOMHelper.find('#close-panel-btn', panel);
+            if (closeBtn) {
+                DOMHelper.on(closeBtn, 'click', () => this.removeDownloadPanel());
+            }
 
-            // 单个文件下载
-            panel.querySelectorAll('.download-single').forEach(btn => {
-                btn.addEventListener('click', async () => {
-                    const [groupIndex, attachmentIndex] = btn.dataset.index.split('-').map(Number);
-                    const attachment = coursewareGroups[groupIndex]?.attachments[attachmentIndex];
+            // 单个下载
+            panel.querySelectorAll('.download-single-btn').forEach(btn => {
+                DOMHelper.on(btn, 'click', async () => {
+                    const [gi, ai] = btn.dataset.index.split('-').map(Number);
+                    const attachment = handlers.getAttachment(gi, ai);
                     if (attachment?.hasDownload) {
-                        await onDownload(attachment.downloadUrl || '', attachment.fileName || attachment.name, attachment);
+                        await handlers.onDownload(attachment);
                     }
                 });
             });
 
-            // 整组下载
-            panel.querySelectorAll('.download-group').forEach(btn => {
-                btn.addEventListener('click', async () => {
-                    const groupIndex = parseInt(btn.dataset.group);
-                    const group = coursewareGroups[groupIndex];
-                    if (group?.attachments) {
-                        const attachmentsToDownload = group.attachments.filter(a => a.hasDownload);
-                        for (let i = 0; i < attachmentsToDownload.length; i++) {
-                            const attachment = attachmentsToDownload[i];
-                            await onDownload(attachment.downloadUrl || '', attachment.fileName || attachment.name, attachment);
-                            if (i < attachmentsToDownload.length - 1) {
-                                await Utils.delay(CONFIG.TIMEOUTS.DOWNLOAD_INTERVAL);
-                            }
+            // 组下载
+            panel.querySelectorAll('.download-group-btn').forEach(btn => {
+                DOMHelper.on(btn, 'click', async () => {
+                    const gi = parseInt(btn.dataset.group);
+                    const attachments = handlers.getGroupAttachments(gi);
+                    for (let i = 0; i < attachments.length; i++) {
+                        await handlers.onDownload(attachments[i]);
+                        if (i < attachments.length - 1) {
+                            await Utils.delay(CONSTANTS.TIMEOUTS.DOWNLOAD_INTERVAL);
                         }
                     }
                 });
             });
 
-            // 下载全部
-            panel.querySelector('#download-all').addEventListener('click', () => {
-                onDownloadAll(coursewareGroups);
-            });
+            // 全部下载
+            const downloadAllBtn = DOMHelper.find('#download-all-btn', panel);
+            if (downloadAllBtn) {
+                DOMHelper.on(downloadAllBtn, 'click', () => handlers.onDownloadAll());
+            }
 
             // 复制链接
-            panel.querySelector('#copy-all').addEventListener('click', () => {
-                onCopy(coursewareGroups);
-            });
-        },
-
-        /**
-         * HTML转义
-         */
-        escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            const copyAllBtn = DOMHelper.find('#copy-all-btn', panel);
+            if (copyAllBtn) {
+                DOMHelper.on(copyAllBtn, 'click', () => handlers.onCopy());
+            }
         }
     };
 
@@ -697,84 +751,60 @@
     // ============================================
 
     const DownloadManager = {
-        /**
-         * 下载单个文件
-         * @param {string} url - 下载URL
-         * @param {string} filename - 文件名
-         * @param {object} attachmentInfo - 附件信息（包含 uploadId, needsFreshUrl 等）
-         */
-        async downloadFile(url, filename, attachmentInfo = null) {
+        // 下载单个文件
+        async downloadFile(attachment) {
             try {
+                const filename = attachment.fileName || attachment.name;
                 const safeName = Utils.sanitizeFilename(filename);
+                let url = attachment.downloadUrl || '';
 
-                // 如果需要实时获取下载链接（针对 allow_download=false 的文件）
-                let actualUrl = url;
-                if (attachmentInfo && attachmentInfo.needsFreshUrl && attachmentInfo.uploadId) {
-                    UI.showNotification(`正在获取下载链接: ${safeName}...`, 'info');
-                    actualUrl = await DownloadUrlFetcher.getFreshDownloadUrl(attachmentInfo.uploadId);
-                    if (!actualUrl) {
-                        UI.showNotification(`获取下载链接失败: ${filename}`, 'error');
+                // 如果需要获取新链接
+                if (attachment.needsFreshUrl && attachment.uploadId) {
+                    UIManager.showNotification(`正在获取下载链接: ${safeName}...`);
+                    url = await CoursewareService.fetchFreshDownloadUrl(attachment.uploadId);
+                    if (!url) {
+                        UIManager.showNotification(`获取下载链接失败: ${filename}`, 'error');
                         return;
                     }
-                    Logger.info('使用实时下载链接:', safeName);
                 }
 
-                const a = document.createElement('a');
-                a.href = actualUrl;
-                a.download = safeName;
-                a.target = '_blank';
-                a.style.display = 'none';
+                // 创建下载链接
+                const a = DOMHelper.create('a', {
+                    attributes: {
+                        href: url,
+                        download: safeName,
+                        target: '_blank'
+                    },
+                    style: 'display: none'
+                });
 
                 document.body.appendChild(a);
                 a.click();
+                setTimeout(() => a.remove(), 100);
 
-                // 延迟移除元素，确保下载触发
-                setTimeout(() => {
-                    document.body.removeChild(a);
-                }, 100);
-
-                UI.showNotification(`开始下载: ${safeName}`);
+                UIManager.showNotification(`开始下载: ${safeName}`, 'success');
                 Logger.info('下载文件:', safeName);
             } catch (err) {
                 Logger.error('下载失败:', err);
-                UI.showNotification(`下载失败: ${filename}`, 'error');
+                UIManager.showNotification(`下载失败: ${attachment.fileName || attachment.name}`, 'error');
             }
         },
 
-        /**
-         * 下载全部文件
-         */
-        async downloadAll(coursewareGroups) {
-            const allAttachments = [];
-            coursewareGroups.forEach(group => {
-                group.attachments.forEach(attachment => {
-                    if (attachment.hasDownload) {
-                        allAttachments.push(attachment);
-                    }
-                });
-            });
+        // 批量下载
+        async downloadMultiple(attachments) {
+            const downloadable = attachments.filter(a => a.hasDownload);
+            UIManager.showNotification(`开始下载 ${downloadable.length} 个文件`, 'info');
 
-            UI.showNotification(`开始下载 ${allAttachments.length} 个文件`);
-
-            for (let i = 0; i < allAttachments.length; i++) {
-                const attachment = allAttachments[i];
-                await this.downloadFile(
-                    attachment.downloadUrl || '',
-                    attachment.fileName || attachment.name,
-                    attachment
-                );
-
-                // 等待一段时间再下载下一个
-                if (i < allAttachments.length - 1) {
-                    await Utils.delay(CONFIG.TIMEOUTS.DOWNLOAD_INTERVAL);
+            for (let i = 0; i < downloadable.length; i++) {
+                await this.downloadFile(downloadable[i]);
+                if (i < downloadable.length - 1) {
+                    await Utils.delay(CONSTANTS.TIMEOUTS.DOWNLOAD_INTERVAL);
                 }
             }
         },
 
-        /**
-         * 复制所有链接
-         */
-        copyAllLinks(coursewareGroups) {
+        // 复制链接
+        copyLinks(coursewareGroups) {
             const links = [];
             coursewareGroups.forEach(group => {
                 group.attachments.forEach(attachment => {
@@ -784,124 +814,148 @@
                 });
             });
 
-            const linkText = links.join('\n');
-
-            navigator.clipboard.writeText(linkText)
-                .then(() => UI.showNotification(`链接已复制到剪贴板 (${links.length} 个文件)`))
-                .catch(() => UI.showNotification('复制失败', 'error'));
+            navigator.clipboard.writeText(links.join('\n'))
+                .then(() => UIManager.showNotification(`链接已复制到剪贴板 (${links.length} 个文件)`, 'success'))
+                .catch(() => UIManager.showNotification('复制失败', 'error'));
         }
     };
 
     // ============================================
-    // 主控制器
+    // 应用控制器
     // ============================================
 
     const App = {
-        isProcessing: false,
         mainButton: null,
+        isProcessing: false,
+        coursewareData: null,
 
-        /**
-         * 初始化
-         */
+        // 初始化
         init() {
-            // 检查是否在课件页面
             if (!window.location.pathname.includes('/courseware')) {
                 return;
             }
 
-            // 等待DOM加载完成
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', () => this.setupUI());
-            } else {
-                this.setupUI();
-            }
-
-            Logger.info(`v${CONFIG.VERSION} 已启动`);
+            this.waitForPageReady().then(() => {
+                this.setup();
+                Logger.info(`v${CONSTANTS.VERSION} 已启动，页面已就绪`);
+            }).catch((error) => {
+                Logger.error('等待页面就绪失败:', error);
+                this.setup(); // 即使失败也显示按钮
+            });
         },
 
-        /**
-         * 设置UI
-         */
-        setupUI() {
-            // 避免重复创建按钮
-            if (document.getElementById('xjtu-fetch-courses-btn')) {
-                return;
+        // 等待页面就绪
+        async waitForPageReady() {
+            const startTime = Date.now();
+
+            while (Date.now() - startTime < CONSTANTS.TIMEOUTS.PAGE_READY) {
+                // 检查 Angular
+                if (!DataProvider.isAngularReady()) {
+                    await Utils.delay(CONSTANTS.POLL_INTERVAL.SLOW);
+                    continue;
+                }
+
+                // 检查课件项
+                const containers = DOMHelper.findAll(CONSTANTS.SELECTORS.COURSEWARE_ITEM);
+                if (containers.length === 0) {
+                    await Utils.delay(CONSTANTS.POLL_INTERVAL.SLOW);
+                    continue;
+                }
+
+                // 验证数据可用
+                const firstContainer = containers[0];
+                await CoursewareService.expandItem(firstContainer);
+                await Utils.delay(300);
+
+                const rows = CoursewareService.getAttachmentRows(firstContainer);
+                if (rows.length > 0) {
+                    const firstUpload = DataProvider.getUploadInfo(rows[0]);
+                    if (firstUpload) {
+                        Logger.info('页面已完全加载，数据可用');
+                        return true;
+                    }
+                }
+
+                await Utils.delay(CONSTANTS.POLL_INTERVAL.SLOW);
             }
 
-            this.mainButton = UI.createMainButton(() => this.fetchCoursewareLinks());
+            throw new Error('页面加载超时');
+        },
+
+        // 设置 UI
+        setup() {
+            if (DOMHelper.find('#xjtu-main-button')) {
+                return;
+            }
+            this.mainButton = UIManager.createMainButton(() => this.fetch());
             document.body.appendChild(this.mainButton);
         },
 
-        /**
-         * 获取所有课件链接
-         */
-        async fetchCoursewareLinks() {
-            // 防止重复执行
+        // 获取课件数据
+        async fetch() {
             if (this.isProcessing) {
-                UI.showNotification('正在处理中，请稍候...', 'error');
+                UIManager.showNotification('正在处理中，请稍候...', 'error');
                 return;
             }
 
             this.isProcessing = true;
-            UI.updateButtonState(this.mainButton, '⏳ 正在获取课件...', true);
+            UIManager.updateMainButton(this.mainButton, '⏳ 正在获取课件...', true);
 
             try {
-                // 等待课件列表加载
-                await Utils.waitForElement(CONFIG.SELECTORS.COURSEWARE_ITEM);
+                const containers = DOMHelper.findAll(CONSTANTS.SELECTORS.COURSEWARE_ITEM);
+                this.coursewareData = [];
 
-                const containers = document.querySelectorAll(CONFIG.SELECTORS.COURSEWARE_ITEM);
-                const coursewareGroups = [];
-
-                // 逐个处理课件
                 for (let i = 0; i < containers.length; i++) {
-                    const container = containers[i];
+                    UIManager.updateMainButton(
+                        this.mainButton,
+                        `⏳ 正在获取课件... (${i + 1}/${containers.length})`,
+                        true
+                    );
 
-                    // 更新进度
-                    UI.updateButtonState(this.mainButton, `⏳ 正在获取课件... (${i + 1}/${containers.length})`, true);
+                    await CoursewareService.expandItem(containers[i]);
+                    await DataProvider.waitForAngularData(
+                        containers[i],
+                        CoursewareService.getAttachmentRows.bind(CoursewareService)
+                    );
 
-                    // 展开附件
-                    await CoursewareExtractor.expandAttachments(container);
-
-                    // 获取课件基本信息
-                    const coursewareInfo = CoursewareExtractor.getCoursewareInfo(container);
-
-                    // 获取所有附件的下载信息
-                    const attachments = await DownloadUrlFetcher.fetchAllCoursewareAttachments(container);
-
-                    coursewareGroups.push({
-                        ...coursewareInfo,
-                        attachments: attachments
-                    });
+                    const info = CoursewareService.getItemInfo(containers[i]);
+                    const attachments = await CoursewareService.collectAttachments(containers[i]);
+                    this.coursewareData.push({ ...info, attachments });
                 }
 
-                // 显示下载面板
-                this.showDownloadPanel(coursewareGroups);
-
-                // 统计文件总数和可下载数
-                const totalFiles = coursewareGroups.reduce((sum, group) => sum + group.attachments.length, 0);
-                const downloadableCount = coursewareGroups.reduce((sum, group) =>
-                    sum + group.attachments.filter(a => a.hasDownload).length, 0);
-
-                UI.showNotification(`成功获取 ${coursewareGroups.length} 个课件项，共 ${totalFiles} 个文件，可下载 ${downloadableCount} 个`);
+                this.showPanel();
+                this.showSuccessMessage();
 
             } catch (error) {
                 Logger.error('获取课件失败:', error);
-                UI.showNotification('获取课件失败: ' + error.message, 'error');
+                UIManager.showNotification('获取课件失败: ' + error.message, 'error');
             } finally {
                 this.isProcessing = false;
-                UI.updateButtonState(this.mainButton, '📥 获取课件下载链接', false);
+                UIManager.updateMainButton(this.mainButton, '📥 获取课件下载链接', false);
             }
         },
 
-        /**
-         * 显示下载面板
-         */
-        showDownloadPanel(coursewareList) {
-            UI.createDownloadPanel(
-                coursewareList,
-                (url, name) => DownloadManager.downloadFile(url, name),
-                (list) => DownloadManager.downloadAll(list),
-                (list) => DownloadManager.copyAllLinks(list)
+        // 显示面板
+        showPanel() {
+            UIManager.createDownloadPanel(this.coursewareData, {
+                getAttachment: (gi, ai) => this.coursewareData[gi]?.attachments[ai],
+                getGroupAttachments: (gi) => this.coursewareData[gi]?.attachments.filter(a => a.hasDownload) || [],
+                onDownload: (att) => DownloadManager.downloadFile(att),
+                onDownloadAll: () => {
+                    const all = this.coursewareData.flatMap(g => g.attachments.filter(a => a.hasDownload));
+                    return DownloadManager.downloadMultiple(all);
+                },
+                onCopy: () => DownloadManager.copyLinks(this.coursewareData)
+            });
+        },
+
+        // 显示成功消息
+        showSuccessMessage() {
+            const totalFiles = this.coursewareData.reduce((sum, g) => sum + g.attachments.length, 0);
+            const downloadableCount = this.coursewareData.reduce((sum, g) => sum + g.attachments.filter(a => a.hasDownload).length, 0);
+            UIManager.showNotification(
+                `成功获取 ${this.coursewareData.length} 个课件项，共 ${totalFiles} 个文件，可下载 ${downloadableCount} 个`,
+                'success'
             );
         }
     };
