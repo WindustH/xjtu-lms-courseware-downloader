@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         西安交大LMS课件下载器
 // @namespace    https://github.com/WindustH/xjtu-lms-courseware-downloader
-// @version      4.2.0
-// @description  自动下载西安交通大学LMS系统的课件文件，支持所有课件（包括无下载权限的）
+// @version      4.5.0
+// @description  自动下载西安交通大学LMS系统的课件文件，支持所有课件（包括无下载权限和时效性token的文件）
 // @author       WindustH
 // @match        https://lms.xjtu.edu.cn/course/*/courseware*
 // @run-at       document-end
@@ -17,7 +17,7 @@
     // ============================================
 
     const CONFIG = {
-        VERSION: '4.2.0',
+        VERSION: '4.5.0',
         SCRIPT_NAME: 'LMS下载器',
         // 选择器
         SELECTORS: {
@@ -241,6 +241,8 @@
          * 获取下载URL
          * 1. 如果 allow_download=false 且有 documentUrl，从 documentUrl 提取实际下载链接
          * 2. 否则使用 API URL，使用 reference_id 而不是 id
+         *
+         * 注意：documentUrl 中的 token 有时效性，建议在下载时实时获取
          */
         getDownloadUrl(uploadInfo) {
             if (!uploadInfo) {
@@ -255,7 +257,7 @@
                     const match = uploadInfo.documentUrl.match(/[?&]file=([^&]+)/);
                     if (match) {
                         const actualUrl = decodeURIComponent(match[1]);
-                        Logger.info('获取下载链接 (documentUrl):', uploadInfo.name, '->', actualUrl);
+                        Logger.info('获取下载链接 (documentUrl):', uploadInfo.name, '->', actualUrl.substring(0, 80) + '...');
                         return Promise.resolve(actualUrl);
                     }
                 } catch (e) {
@@ -269,6 +271,63 @@
             const url = `/api/uploads/reference/${id}/blob`;
             Logger.info('获取下载链接 (API):', uploadInfo.name, '->', url);
             return Promise.resolve(url);
+        },
+
+        /**
+         * 实时获取下载URL（用于 allow_download=false 的文件）
+         * 通过点击附件触发 documentUrl 加载，然后提取链接并关闭预览
+         */
+        async getFreshDownloadUrl(uploadId) {
+            try {
+                // 在页面上查找对应的 upload
+                const attachmentRows = document.querySelectorAll(CONFIG.SELECTORS.ATTACHMENT_ROW);
+                for (const row of attachmentRows) {
+                    const uploadInfo = CoursewareExtractor.getUploadInfo(row);
+                    if (uploadInfo && uploadInfo.id === uploadId) {
+                        // 点击附件触发 documentUrl 加载
+                        row.click();
+                        await Utils.delay(300); // 等待 documentUrl 加载
+
+                        // 重新获取 upload 信息（现在应该有 documentUrl 了）
+                        const updatedInfo = CoursewareExtractor.getUploadInfo(row);
+                        if (updatedInfo && updatedInfo.documentUrl) {
+                            const match = updatedInfo.documentUrl.match(/[?&]file=([^&]+)/);
+                            if (match) {
+                                const url = decodeURIComponent(match[1]);
+
+                                // 关闭预览窗口
+                                this.closePreview();
+
+                                return url;
+                            }
+                        }
+
+                        // 如果没有找到 documentUrl，关闭预览
+                        this.closePreview();
+                    }
+                }
+                return null;
+            } catch (e) {
+                Logger.error('获取实时下载链接失败:', e);
+                this.closePreview();
+                return null;
+            }
+        },
+
+        /**
+         * 关闭预览窗口
+         */
+        closePreview() {
+            try {
+                // 查找并点击关闭按钮
+                const closeBtn = document.querySelector('.modal-header .close, .modal-footer .btn-default, [ng-click*="close"], [ng-click*="cancel"]');
+                if (closeBtn) {
+                    closeBtn.click();
+                    Utils.delay(100);
+                }
+            } catch (e) {
+                Logger.warn('关闭预览窗口失败:', e);
+            }
         },
 
         /**
@@ -308,15 +367,26 @@
                     continue;
                 }
 
+                const isNoDownload = uploadInfo.allow_download === false;
+
                 try {
-                    const downloadUrl = await this.getDownloadUrl(uploadInfo);
+                    let downloadUrl;
+                    if (isNoDownload) {
+                        // 对于无下载权限的文件，暂不获取链接，下载时实时获取
+                        downloadUrl = null;
+                    } else {
+                        downloadUrl = await this.getDownloadUrl(uploadInfo);
+                    }
+
                     attachments.push({
                         ...coursewareInfo,
                         fileName: uploadInfo.name || fileName,
                         size: fileSize,
                         downloadUrl,
                         hasDownload: true,
-                        allowDownload: uploadInfo.allow_download || false
+                        allowDownload: uploadInfo.allow_download || false,
+                        uploadId: uploadInfo.id,
+                        needsFreshUrl: isNoDownload
                     });
                 } catch (e) {
                     Logger.error('获取下载链接失败:', uploadInfo.id, e.message);
@@ -574,28 +644,29 @@
 
             // 单个文件下载
             panel.querySelectorAll('.download-single').forEach(btn => {
-                btn.addEventListener('click', () => {
+                btn.addEventListener('click', async () => {
                     const [groupIndex, attachmentIndex] = btn.dataset.index.split('-').map(Number);
                     const attachment = coursewareGroups[groupIndex]?.attachments[attachmentIndex];
-                    if (attachment?.downloadUrl) {
-                        onDownload(attachment.downloadUrl, attachment.fileName || attachment.name);
+                    if (attachment?.hasDownload) {
+                        await onDownload(attachment.downloadUrl || '', attachment.fileName || attachment.name, attachment);
                     }
                 });
             });
 
             // 整组下载
             panel.querySelectorAll('.download-group').forEach(btn => {
-                btn.addEventListener('click', () => {
+                btn.addEventListener('click', async () => {
                     const groupIndex = parseInt(btn.dataset.group);
                     const group = coursewareGroups[groupIndex];
                     if (group?.attachments) {
-                        group.attachments.forEach((attachment, index) => {
-                            if (attachment.hasDownload && attachment.downloadUrl) {
-                                setTimeout(() => {
-                                    onDownload(attachment.downloadUrl, attachment.fileName || attachment.name);
-                                }, index * CONFIG.TIMEOUTS.DOWNLOAD_INTERVAL);
+                        const attachmentsToDownload = group.attachments.filter(a => a.hasDownload);
+                        for (let i = 0; i < attachmentsToDownload.length; i++) {
+                            const attachment = attachmentsToDownload[i];
+                            await onDownload(attachment.downloadUrl || '', attachment.fileName || attachment.name, attachment);
+                            if (i < attachmentsToDownload.length - 1) {
+                                await Utils.delay(CONFIG.TIMEOUTS.DOWNLOAD_INTERVAL);
                             }
-                        });
+                        }
                     }
                 });
             });
@@ -628,12 +699,28 @@
     const DownloadManager = {
         /**
          * 下载单个文件
+         * @param {string} url - 下载URL
+         * @param {string} filename - 文件名
+         * @param {object} attachmentInfo - 附件信息（包含 uploadId, needsFreshUrl 等）
          */
-        downloadFile(url, filename) {
+        async downloadFile(url, filename, attachmentInfo = null) {
             try {
                 const safeName = Utils.sanitizeFilename(filename);
+
+                // 如果需要实时获取下载链接（针对 allow_download=false 的文件）
+                let actualUrl = url;
+                if (attachmentInfo && attachmentInfo.needsFreshUrl && attachmentInfo.uploadId) {
+                    UI.showNotification(`正在获取下载链接: ${safeName}...`, 'info');
+                    actualUrl = await DownloadUrlFetcher.getFreshDownloadUrl(attachmentInfo.uploadId);
+                    if (!actualUrl) {
+                        UI.showNotification(`获取下载链接失败: ${filename}`, 'error');
+                        return;
+                    }
+                    Logger.info('使用实时下载链接:', safeName);
+                }
+
                 const a = document.createElement('a');
-                a.href = url;
+                a.href = actualUrl;
                 a.download = safeName;
                 a.target = '_blank';
                 a.style.display = 'none';
@@ -657,23 +744,31 @@
         /**
          * 下载全部文件
          */
-        downloadAll(coursewareGroups) {
+        async downloadAll(coursewareGroups) {
             const allAttachments = [];
             coursewareGroups.forEach(group => {
                 group.attachments.forEach(attachment => {
-                    if (attachment.hasDownload && attachment.downloadUrl) {
+                    if (attachment.hasDownload) {
                         allAttachments.push(attachment);
                     }
                 });
             });
 
-            allAttachments.forEach((attachment, index) => {
-                setTimeout(() => {
-                    this.downloadFile(attachment.downloadUrl, attachment.fileName || attachment.name);
-                }, index * CONFIG.TIMEOUTS.DOWNLOAD_INTERVAL);
-            });
-
             UI.showNotification(`开始下载 ${allAttachments.length} 个文件`);
+
+            for (let i = 0; i < allAttachments.length; i++) {
+                const attachment = allAttachments[i];
+                await this.downloadFile(
+                    attachment.downloadUrl || '',
+                    attachment.fileName || attachment.name,
+                    attachment
+                );
+
+                // 等待一段时间再下载下一个
+                if (i < allAttachments.length - 1) {
+                    await Utils.delay(CONFIG.TIMEOUTS.DOWNLOAD_INTERVAL);
+                }
+            }
         },
 
         /**
