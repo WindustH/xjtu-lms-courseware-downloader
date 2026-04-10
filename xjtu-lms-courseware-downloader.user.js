@@ -238,18 +238,36 @@
 
     const DownloadUrlFetcher = {
         /**
-         * 获取下载URL（直接使用API URL，避免重定向URL的时效性问题）
-         * 使用 reference_id 而不是 id，与页面中的下载链接保持一致
+         * 获取下载URL
+         * 1. 如果 allow_download=false 且有 documentUrl，从 documentUrl 提取实际下载链接
+         * 2. 否则使用 API URL，使用 reference_id 而不是 id
          */
         getDownloadUrl(uploadInfo) {
             if (!uploadInfo) {
                 return Promise.reject(new Error('uploadInfo 为空'));
             }
 
+            // 情况1: allow_download=false，但提供了 documentUrl（包含实际的媒体服务器下载链接）
+            if (uploadInfo.allow_download === false && uploadInfo.documentUrl) {
+                try {
+                    // documentUrl 格式: /note-bene/pdf-viewer?file=URL_ENCODED_DOWNLOAD_URL&...
+                    // 从中提取 file 参数
+                    const match = uploadInfo.documentUrl.match(/[?&]file=([^&]+)/);
+                    if (match) {
+                        const actualUrl = decodeURIComponent(match[1]);
+                        Logger.info('获取下载链接 (documentUrl):', uploadInfo.name, '->', actualUrl);
+                        return Promise.resolve(actualUrl);
+                    }
+                } catch (e) {
+                    Logger.warn('解析 documentUrl 失败:', e);
+                }
+            }
+
+            // 情况2: 正常下载，使用 API URL
             // 优先使用 reference_id，与页面中的下载链接一致
             const id = uploadInfo.reference_id || uploadInfo.id;
             const url = `/api/uploads/reference/${id}/blob`;
-            Logger.info('获取下载链接:', uploadInfo.name, '->', url);
+            Logger.info('获取下载链接 (API):', uploadInfo.name, '->', url);
             return Promise.resolve(url);
         },
 
