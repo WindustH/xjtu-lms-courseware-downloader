@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         西安交大LMS课件下载器
 // @namespace    https://github.com/WindustH/xjtu-lms-courseware-downloader
-// @version      6.1.0
+// @version      6.2.0
 // @description  自动下载西安交通大学LMS系统的课件文件，支持所有课件（包括无下载权限和时效性token的文件）
 // @author       WindustH
 // @match        https://lms.xjtu.edu.cn/course/*/courseware*
@@ -18,7 +18,7 @@
     // ============================================
 
     const CONSTANTS = {
-        VERSION: '6.1.0',
+        VERSION: '6.2.0',
         SCRIPT_NAME: 'LMS下载器',
 
         // DOM 选择器
@@ -57,24 +57,496 @@
         },
 
         // 文件名限制
-        MAX_FILENAME_LENGTH: 200
+        MAX_FILENAME_LENGTH: 200,
+
+        // 同时显示的通知数量上限
+        MAX_SNACKBARS: 3,
+
+        // 主按钮文字
+        MAIN_BUTTON_LABEL: '获取课件下载链接'
     };
 
-    // 颜色主题
+    // Material Design 3 主题（配色由种子色 #1e88e5 经 Content 方案生成，跟随系统深色模式）
+    // 所有组件样式都挂在脚本自身元素的 id 下，避免被页面全局样式 (Foundation) 覆盖
     const Theme = {
-        colors: {
-            primary: '#1e88e5',
-            primaryDark: '#1565c0',
-            success: '#4caf50',
-            error: '#f44336',
-            warning: '#ff9800',
-            gray: '#e0e0e0',
-            lightGray: '#f5f5f5'
+        STYLE_ID: 'xjtu-md-styles',
+
+        css: `
+            .xjtu-md {
+                --md-primary: #005ea4;
+                --md-on-primary: #ffffff;
+                --md-primary-container: #0077ce;
+                --md-on-primary-container: #fdfcff;
+                --md-secondary-container: #b7d4fd;
+                --md-on-secondary-container: #3f5b7f;
+                --md-tertiary-container: #9f56bb;
+                --md-on-tertiary-container: #fffbff;
+                --md-error: #ba1a1a;
+                --md-on-surface: #181c22;
+                --md-on-surface-variant: #404752;
+                --md-outline: #707783;
+                --md-outline-variant: #c0c7d4;
+                --md-inverse-surface: #2d3137;
+                --md-inverse-on-surface: #eef0f9;
+                --md-inverse-primary: #a2c9ff;
+                --md-inverse-error: #ffb4ab;
+                --xjtu-sheet-bg: #ebeef6;
+                --xjtu-card-bg: #ffffff;
+
+                --md-elevation-1: 0 1px 2px rgba(0, 0, 0, .3), 0 1px 3px 1px rgba(0, 0, 0, .15);
+                --md-elevation-3: 0 1px 3px rgba(0, 0, 0, .3), 0 4px 8px 3px rgba(0, 0, 0, .15);
+                --md-elevation-4: 0 2px 3px rgba(0, 0, 0, .3), 0 6px 10px 4px rgba(0, 0, 0, .15);
+                --md-ease-standard: cubic-bezier(.2, 0, 0, 1);
+                --md-ease-emphasized-decelerate: cubic-bezier(.05, .7, .1, 1);
+                --md-font: Roboto, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+
+                font-family: var(--md-font);
+                font-size: 14px;
+                line-height: 20px;
+                letter-spacing: normal;
+                text-align: left;
+                color: var(--md-on-surface);
+                -webkit-font-smoothing: antialiased;
+            }
+
+            @media (prefers-color-scheme: dark) {
+                .xjtu-md {
+                    --md-primary: #a2c9ff;
+                    --md-on-primary: #00315b;
+                    --md-primary-container: #3394f1;
+                    --md-on-primary-container: #001f3c;
+                    --md-secondary-container: #2b486b;
+                    --md-on-secondary-container: #9bb7e0;
+                    --md-tertiary-container: #be72da;
+                    --md-on-tertiary-container: #36004b;
+                    --md-error: #ffb4ab;
+                    --md-on-surface: #e0e2ea;
+                    --md-on-surface-variant: #c0c7d4;
+                    --md-outline: #8a919e;
+                    --md-outline-variant: #404752;
+                    --md-inverse-surface: #e0e2ea;
+                    --md-inverse-on-surface: #2d3137;
+                    --md-inverse-primary: #0060a8;
+                    --md-inverse-error: #ba1a1a;
+                    --xjtu-sheet-bg: #181c22;
+                    --xjtu-card-bg: #262a30;
+                }
+            }
+
+            #xjtu-download-panel, #xjtu-download-panel *, #xjtu-snackbar-host * {
+                box-sizing: border-box;
+            }
+
+            .xjtu-md .xjtu-icon {
+                display: block;
+                flex: none;
+                fill: currentColor;
+            }
+
+            /* 按钮重置 + 状态层 */
+            #xjtu-main-button, #xjtu-download-panel button {
+                all: unset;
+                box-sizing: border-box;
+                position: relative;
+                display: inline-flex;
+                flex: none;
+                align-items: center;
+                justify-content: center;
+                overflow: hidden;
+                cursor: pointer;
+                user-select: none;
+                -webkit-tap-highlight-color: transparent;
+            }
+            #xjtu-main-button::before, #xjtu-download-panel button::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                border-radius: inherit;
+                background: currentColor;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity 150ms linear;
+            }
+            #xjtu-main-button:hover::before, #xjtu-download-panel button:hover::before {
+                opacity: .08;
+            }
+            #xjtu-main-button:active::before, #xjtu-download-panel button:active::before,
+            #xjtu-main-button:focus-visible::before, #xjtu-download-panel button:focus-visible::before {
+                opacity: .1;
+            }
+            #xjtu-main-button:focus-visible, #xjtu-download-panel button:focus-visible {
+                outline: 3px solid var(--md-primary);
+                outline-offset: 2px;
+            }
+            #xjtu-download-panel button:disabled {
+                cursor: default;
+                color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+                background: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+                box-shadow: none;
+            }
+            #xjtu-download-panel button:disabled::before {
+                opacity: 0;
+            }
+
+            /* 扩展 FAB */
+            #xjtu-main-button {
+                position: fixed;
+                right: 24px;
+                bottom: 24px;
+                z-index: 9999;
+                height: 56px;
+                gap: 12px;
+                padding: 0 20px 0 16px;
+                border-radius: 16px;
+                background: var(--md-primary-container);
+                color: var(--md-on-primary-container);
+                box-shadow: var(--md-elevation-3);
+                font: 500 14px/20px var(--md-font);
+                letter-spacing: .1px;
+                transition: box-shadow 200ms var(--md-ease-standard);
+            }
+            #xjtu-main-button:hover {
+                box-shadow: var(--md-elevation-4);
+            }
+            #xjtu-main-button:disabled {
+                cursor: progress;
+            }
+            #xjtu-main-button .xjtu-spinner {
+                display: none;
+                width: 20px;
+                height: 20px;
+                margin: 2px;
+                border: 2.5px solid currentColor;
+                border-right-color: transparent;
+                border-radius: 50%;
+                animation: xjtu-spin 800ms linear infinite;
+            }
+            #xjtu-main-button.xjtu-loading .xjtu-icon {
+                display: none;
+            }
+            #xjtu-main-button.xjtu-loading .xjtu-spinner {
+                display: block;
+            }
+
+            /* 面板 */
+            #xjtu-download-panel {
+                position: fixed;
+                top: 16px;
+                right: 16px;
+                z-index: 10000;
+                display: flex;
+                flex-direction: column;
+                width: min(420px, calc(100vw - 32px));
+                max-height: calc(100vh - 32px);
+                background: var(--xjtu-sheet-bg);
+                border-radius: 28px;
+                box-shadow: var(--md-elevation-3);
+                overflow: hidden;
+                transform-origin: top right;
+                animation: xjtu-sheet-enter 400ms var(--md-ease-emphasized-decelerate);
+            }
+            #xjtu-download-panel .xjtu-sheet-header {
+                display: flex;
+                align-items: flex-start;
+                gap: 8px;
+                padding: 20px 12px 12px 24px;
+            }
+            #xjtu-download-panel .xjtu-sheet-headline {
+                flex: 1;
+                min-width: 0;
+                padding-top: 4px;
+            }
+            #xjtu-download-panel .xjtu-sheet-title {
+                font-size: 22px;
+                line-height: 28px;
+                font-weight: 400;
+            }
+            #xjtu-download-panel .xjtu-sheet-subtitle {
+                margin-top: 4px;
+                font-size: 12px;
+                line-height: 16px;
+                letter-spacing: .4px;
+                color: var(--md-on-surface-variant);
+            }
+            #xjtu-download-panel .xjtu-sheet-body {
+                flex: 1 1 auto;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+                padding: 4px 16px 16px;
+                overflow-y: auto;
+                overscroll-behavior: contain;
+                scrollbar-width: thin;
+                scrollbar-color: var(--md-outline-variant) transparent;
+            }
+            #xjtu-download-panel .xjtu-sheet-footer {
+                flex: none;
+                padding: 16px 24px 20px;
+                border-top: 1px solid var(--md-outline-variant);
+            }
+            #xjtu-download-panel .xjtu-note {
+                display: flex;
+                align-items: flex-start;
+                gap: 8px;
+                margin-bottom: 12px;
+                font-size: 12px;
+                line-height: 16px;
+                letter-spacing: .4px;
+                color: var(--md-on-surface-variant);
+            }
+            #xjtu-download-panel .xjtu-actions {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: flex-end;
+                gap: 8px;
+            }
+            #xjtu-download-panel .xjtu-empty {
+                padding: 32px 16px;
+                text-align: center;
+                color: var(--md-on-surface-variant);
+            }
+
+            /* 课件卡片 */
+            #xjtu-download-panel .xjtu-card {
+                flex: none;
+                padding: 4px 0;
+                background: var(--xjtu-card-bg);
+                border-radius: 16px;
+            }
+            #xjtu-download-panel .xjtu-card-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 12px 12px 8px 16px;
+            }
+            #xjtu-download-panel .xjtu-avatar {
+                flex: none;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background: var(--md-primary-container);
+                color: var(--md-on-primary-container);
+                font-size: 16px;
+                font-weight: 500;
+            }
+            #xjtu-download-panel .xjtu-card-headline {
+                flex: 1;
+                min-width: 0;
+            }
+            #xjtu-download-panel .xjtu-card-title {
+                font-size: 16px;
+                line-height: 24px;
+                font-weight: 500;
+                letter-spacing: .15px;
+                overflow-wrap: anywhere;
+            }
+            #xjtu-download-panel .xjtu-card-subtitle {
+                font-size: 12px;
+                line-height: 16px;
+                letter-spacing: .4px;
+                color: var(--md-on-surface-variant);
+            }
+
+            /* 附件列表项 */
+            #xjtu-download-panel .xjtu-list-item {
+                display: flex;
+                align-items: center;
+                gap: 16px;
+                min-height: 64px;
+                padding: 8px 12px 8px 16px;
+            }
+            #xjtu-download-panel .xjtu-file-badge {
+                flex: none;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 40px;
+                height: 40px;
+                border-radius: 12px;
+                background: var(--md-secondary-container);
+                color: var(--md-on-secondary-container);
+                font-size: 11px;
+                line-height: 16px;
+                font-weight: 600;
+                letter-spacing: .5px;
+            }
+            #xjtu-download-panel .xjtu-list-text {
+                flex: 1;
+                min-width: 0;
+            }
+            #xjtu-download-panel .xjtu-list-headline {
+                font-size: 14px;
+                line-height: 20px;
+                font-weight: 500;
+                letter-spacing: .1px;
+                overflow-wrap: anywhere;
+            }
+            #xjtu-download-panel .xjtu-list-supporting {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 4px 8px;
+                margin-top: 4px;
+                font-size: 12px;
+                line-height: 16px;
+                letter-spacing: .4px;
+                color: var(--md-on-surface-variant);
+            }
+            #xjtu-download-panel .xjtu-label {
+                display: inline-flex;
+                align-items: center;
+                gap: 2px;
+                height: 20px;
+                padding: 0 6px 0 4px;
+                border-radius: 6px;
+                background: var(--md-tertiary-container);
+                color: var(--md-on-tertiary-container);
+                font-size: 11px;
+                font-weight: 500;
+                letter-spacing: .5px;
+            }
+            #xjtu-download-panel .xjtu-list-error {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                margin-top: 4px;
+                font-size: 12px;
+                line-height: 16px;
+                color: var(--md-error);
+            }
+            #xjtu-download-panel .xjtu-list-item-disabled .xjtu-file-badge,
+            #xjtu-download-panel .xjtu-list-item-disabled .xjtu-list-headline {
+                opacity: .38;
+            }
+
+            /* 按钮 */
+            #xjtu-download-panel .xjtu-btn {
+                height: 40px;
+                gap: 8px;
+                padding: 0 24px 0 16px;
+                border-radius: 20px;
+                font-size: 14px;
+                line-height: 20px;
+                font-weight: 500;
+                letter-spacing: .1px;
+                white-space: nowrap;
+                transition: box-shadow 200ms var(--md-ease-standard);
+            }
+            #xjtu-download-panel .xjtu-btn-small {
+                height: 32px;
+                gap: 4px;
+                padding: 0 12px 0 8px;
+                border-radius: 16px;
+            }
+            #xjtu-download-panel .xjtu-btn-filled {
+                background: var(--md-primary);
+                color: var(--md-on-primary);
+            }
+            #xjtu-download-panel .xjtu-btn-filled:hover {
+                box-shadow: var(--md-elevation-1);
+            }
+            #xjtu-download-panel .xjtu-btn-tonal {
+                background: var(--md-secondary-container);
+                color: var(--md-on-secondary-container);
+            }
+            #xjtu-download-panel .xjtu-btn-outlined {
+                border: 1px solid var(--md-outline);
+                color: var(--md-primary);
+            }
+            #xjtu-download-panel .xjtu-icon-btn {
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                color: var(--md-on-surface-variant);
+            }
+            #xjtu-download-panel .xjtu-icon-btn-tonal {
+                background: var(--md-secondary-container);
+                color: var(--md-on-secondary-container);
+            }
+
+            /* Snackbar */
+            #xjtu-snackbar-host {
+                position: fixed;
+                left: 50%;
+                bottom: 24px;
+                z-index: 10001;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 8px;
+                width: max-content;
+                max-width: calc(100vw - 32px);
+                transform: translateX(-50%);
+                pointer-events: none;
+            }
+            #xjtu-snackbar-host .xjtu-snackbar {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                min-height: 48px;
+                max-width: 560px;
+                padding: 14px 16px;
+                border-radius: 4px;
+                background: var(--md-inverse-surface);
+                color: var(--md-inverse-on-surface);
+                box-shadow: var(--md-elevation-3);
+                letter-spacing: .25px;
+                animation: xjtu-snackbar-enter 250ms var(--md-ease-emphasized-decelerate);
+            }
+            #xjtu-snackbar-host .xjtu-icon {
+                color: var(--md-inverse-primary);
+            }
+            #xjtu-snackbar-host .xjtu-snackbar-error .xjtu-icon {
+                color: var(--md-inverse-error);
+            }
+            #xjtu-snackbar-host .xjtu-snackbar-leaving {
+                animation: xjtu-snackbar-leave 150ms ease-in forwards;
+            }
+            @media (max-width: 600px) {
+                #xjtu-snackbar-host {
+                    bottom: 96px;
+                }
+            }
+
+            @keyframes xjtu-spin {
+                to { transform: rotate(360deg); }
+            }
+            @keyframes xjtu-sheet-enter {
+                from { opacity: 0; transform: translateY(-8px) scale(.96); }
+            }
+            @keyframes xjtu-snackbar-enter {
+                from { opacity: 0; transform: translateY(8px) scale(.96); }
+            }
+            @keyframes xjtu-snackbar-leave {
+                to { opacity: 0; transform: translateY(4px); }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                #xjtu-download-panel, #xjtu-snackbar-host .xjtu-snackbar {
+                    animation: none;
+                }
+            }
+        `
+    };
+
+    // Material Symbols 图标 (24×24)
+    const Icons = {
+        paths: {
+            download: 'M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z',
+            close: 'M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
+            copy: 'M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z',
+            file: 'M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z',
+            lock: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z',
+            check: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z',
+            error: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z',
+            info: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z'
         },
 
-        gradients: {
-            button: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%)',
-            header: 'linear-gradient(135deg, #1e88e5 0%, #1565c0 100%)'
+        render(name, size = 24) {
+            return `<svg class="xjtu-icon" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><path d="${this.paths[name]}"/></svg>`;
         }
     };
 
@@ -481,60 +953,63 @@
     // ============================================
 
     const UIManager = {
-        // 显示通知
-        showNotification(message, type = 'info') {
-            const colors = {
-                error: Theme.colors.error,
-                success: Theme.colors.success,
-                info: Theme.colors.success
-            };
-
-            const notification = DOMHelper.create('div', {
-                style: `
-                    position: fixed;
-                    top: 80px;
-                    right: 20px;
-                    background: ${colors[type] || colors.info};
-                    color: white;
-                    padding: 15px 20px;
-                    border-radius: 6px;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-                    z-index: 10001;
-                    font-size: 14px;
-                    font-family: Arial, sans-serif;
-                `,
-                textContent: message
+        // 注入样式
+        injectStyles() {
+            if (DOMHelper.find(`#${Theme.STYLE_ID}`)) {
+                return;
+            }
+            const style = DOMHelper.create('style', {
+                id: Theme.STYLE_ID,
+                textContent: Theme.css
             });
-
-            document.body.appendChild(notification);
-            setTimeout(() => notification.remove(), CONSTANTS.TIMEOUTS.NOTIFICATION_DURATION);
+            (document.head || document.documentElement).appendChild(style);
         },
 
-        // 创建主按钮
+        // 获取 Snackbar 容器
+        getSnackbarHost() {
+            let host = DOMHelper.find('#xjtu-snackbar-host');
+            if (!host) {
+                host = DOMHelper.create('div', { id: 'xjtu-snackbar-host', className: 'xjtu-md' });
+                document.body.appendChild(host);
+            }
+            return host;
+        },
+
+        // 显示通知 (Snackbar)
+        showNotification(message, type = 'info') {
+            const icons = {
+                error: 'error',
+                success: 'check',
+                info: 'info'
+            };
+
+            const host = this.getSnackbarHost();
+            const snackbar = DOMHelper.create('div', {
+                className: `xjtu-snackbar xjtu-snackbar-${type}`,
+                attributes: { role: type === 'error' ? 'alert' : 'status' },
+                innerHTML: `${Icons.render(icons[type] || icons.info, 20)}<span>${Utils.escapeHtml(message)}</span>`
+            });
+
+            host.appendChild(snackbar);
+            while (host.children.length > CONSTANTS.MAX_SNACKBARS) {
+                host.firstElementChild.remove();
+            }
+
+            setTimeout(() => {
+                snackbar.classList.add('xjtu-snackbar-leaving');
+                setTimeout(() => snackbar.remove(), 150);
+            }, CONSTANTS.TIMEOUTS.NOTIFICATION_DURATION);
+        },
+
+        // 创建主按钮 (扩展 FAB)
         createMainButton(onClick) {
             const button = DOMHelper.create('button', {
                 id: 'xjtu-main-button',
-                style: `
-                    position: fixed;
-                    bottom: 30px;
-                    right: 30px;
-                    background: ${Theme.gradients.button};
-                    color: white;
-                    border: none;
-                    padding: 15px 25px;
-                    border-radius: 30px;
-                    font-size: 16px;
-                    font-weight: bold;
-                    cursor: pointer;
-                    box-shadow: 0 4px 15px rgba(238, 90, 111, 0.4);
-                    z-index: 9999;
-                    transition: all 0.3s ease;
-                `,
-                textContent: '📥 获取课件下载链接'
+                className: 'xjtu-md',
+                attributes: { type: 'button' },
+                innerHTML: `${Icons.render('download')}<span class="xjtu-spinner"></span><span class="xjtu-fab-label">${CONSTANTS.MAIN_BUTTON_LABEL}</span>`
             });
 
-            button.onmouseover = () => button.style.transform = 'translateY(-2px)';
-            button.onmouseout = () => button.style.transform = 'translateY(0)';
             DOMHelper.on(button, 'click', onClick);
 
             return button;
@@ -544,7 +1019,8 @@
         updateMainButton(button, text, disabled = false) {
             if (button) {
                 button.disabled = disabled;
-                button.textContent = text;
+                button.classList.toggle('xjtu-loading', disabled);
+                button.querySelector('.xjtu-fab-label').textContent = text;
             }
         },
 
@@ -554,23 +1030,11 @@
 
             const panel = DOMHelper.create('div', {
                 id: 'xjtu-download-panel',
-                style: `
-                    position: fixed;
-                    top: 20px;
-                    right: 20px;
-                    width: 420px;
-                    max-height: 80vh;
-                    background: white;
-                    border: 2px solid ${Theme.colors.primary};
-                    border-radius: 8px;
-                    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-                    z-index: 10000;
-                    font-family: Arial, sans-serif;
-                    overflow: hidden;
-                `
+                className: 'xjtu-md',
+                attributes: { role: 'dialog', 'aria-label': '课件下载器' },
+                innerHTML: this.renderPanel(coursewareGroups)
             });
 
-            panel.innerHTML = this.renderPanel(coursewareGroups);
             document.body.appendChild(panel);
             this.bindPanelEvents(panel, handlers);
         },
@@ -607,112 +1071,102 @@
 
         // 渲染面板头部
         renderPanelHeader(stats) {
+            const meta = [
+                `v${CONSTANTS.VERSION}`,
+                `课程 ${stats.courseId}`,
+                `${stats.totalItems} 个课件项`,
+                `${stats.totalFiles} 个文件`
+            ].join(' · ');
+
             return `
-                <div style="background: ${Theme.gradients.header};
-                        color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <div style="font-size: 18px; font-weight: bold;">📚 课件下载器 v${CONSTANTS.VERSION}</div>
-                        <div style="font-size: 12px; opacity: 0.9;">
-                            课程: ${stats.courseId} | ${stats.totalItems} 个课件项 | ${stats.totalFiles} 个文件
-                        </div>
+                <div class="xjtu-sheet-header">
+                    <div class="xjtu-sheet-headline">
+                        <div class="xjtu-sheet-title">课件下载器</div>
+                        <div class="xjtu-sheet-subtitle">${meta}</div>
                     </div>
-                    <button id="close-panel-btn" style="background: rgba(255,255,255,0.2); border: none;
-                            color: white; font-size: 20px; cursor: pointer;
-                            padding: 5px 10px; border-radius: 4px;">✕</button>
+                    <button type="button" id="close-panel-btn" class="xjtu-icon-btn" title="关闭" aria-label="关闭">${Icons.render('close')}</button>
                 </div>
             `;
         },
 
         // 渲染面板主体
         renderPanelBody(groups) {
-            const itemsHTML = groups.map((group, gi) => this.renderGroup(group, gi)).join('');
-            return `<div style="padding: 15px; max-height: 50vh; overflow-y: auto;">${itemsHTML}</div>`;
+            const content = groups.length > 0
+                ? groups.map((group, gi) => this.renderGroup(group, gi)).join('')
+                : '<div class="xjtu-empty">没有找到课件</div>';
+            return `<div class="xjtu-sheet-body">${content}</div>`;
         },
 
-        // 渲染组
+        // 渲染组 (卡片)
         renderGroup(group, index) {
             const attachmentsHTML = group.attachments.map((att, ai) => this.renderAttachment(att, index, ai)).join('');
             const downloadableCount = group.attachments.filter(a => a.hasDownload).length;
+            const meta = [
+                group.module,
+                `${group.attachments.length} 个文件`,
+                `可下载 ${downloadableCount} 个`
+            ].filter(Boolean).map(text => Utils.escapeHtml(text)).join(' · ');
 
             return `
-                <div style="padding: 10px; margin-bottom: 15px;
-                        border: 1px solid ${Theme.colors.primary}; border-radius: 8px; background: #f8f9fa;">
-                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding-bottom: 8px;
-                            border-bottom: 1px solid ${Theme.colors.gray};">
-                        <div style="background: ${Theme.colors.primary}; color: white;
-                                width: 24px; height: 24px; border-radius: 50%;
-                                display: flex; align-items: center; justify-content: center;
-                                font-size: 12px; font-weight: bold;">${index + 1}</div>
-                        <div style="flex: 1;">
-                            <div style="font-weight: bold; color: #333; font-size: 14px;">${Utils.escapeHtml(group.name)}</div>
-                            <div style="font-size: 11px; color: #666;">
-                                ${group.module ? `📖 ${Utils.escapeHtml(group.module)}` : ''}
-                                <span style="margin-left: 8px;">📎 ${group.attachments.length} 个文件</span>
-                                <span style="margin-left: 8px;">⬇ 可下载 ${downloadableCount} 个</span>
-                            </div>
+                <div class="xjtu-card">
+                    <div class="xjtu-card-header">
+                        <div class="xjtu-avatar">${index + 1}</div>
+                        <div class="xjtu-card-headline">
+                            <div class="xjtu-card-title">${Utils.escapeHtml(group.name)}</div>
+                            <div class="xjtu-card-subtitle">${meta}</div>
                         </div>
-                        <button class="download-group-btn" data-group="${index}"
-                                style="background: ${Theme.colors.success}; color: white; border: none;
-                                       padding: 5px 10px; border-radius: 4px; cursor: pointer;
-                                       font-size: 12px; font-weight: bold;">下载本组</button>
+                        <button type="button" class="download-group-btn xjtu-btn xjtu-btn-tonal xjtu-btn-small" data-group="${index}"
+                                ${downloadableCount > 0 ? '' : 'disabled'}>${Icons.render('download', 18)}下载本组</button>
                     </div>
                     ${attachmentsHTML}
                 </div>
             `;
         },
 
-        // 渲染附件
+        // 渲染附件 (列表项)
         renderAttachment(attachment, groupIndex, attachIndex) {
             const dataIndex = `${groupIndex}-${attachIndex}`;
+            const displayName = attachment.fileName || attachment.name;
+            const isProtected = attachment.hasDownload && !attachment.allowDownload;
+
             return `
-                <div style="padding: 8px; margin-top: 8px;
-                        border: 1px solid ${Theme.colors.gray}; border-radius: 4px;
-                        background: white; ${attachment.hasDownload ? '' : 'opacity: 0.6;'}">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <div style="flex: 1; min-width: 0;">
-                            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 2px;">
-                                <span style="font-size: 13px; color: #333;">${Utils.escapeHtml(attachment.fileName || attachment.name)}</span>
-                                ${attachment.hasDownload && !attachment.allowDownload ? `
-                                    <span style="background: ${Theme.colors.warning}; color: white;
-                                           font-size: 9px; padding: 1px 4px; border-radius: 2px;">私有版权保护</span>
-                                ` : ''}
+                <div class="xjtu-list-item${attachment.hasDownload ? '' : ' xjtu-list-item-disabled'}">
+                    ${this.renderFileBadge(displayName)}
+                    <div class="xjtu-list-text">
+                        <div class="xjtu-list-headline">${Utils.escapeHtml(displayName)}</div>
+                        ${attachment.size || isProtected ? `
+                            <div class="xjtu-list-supporting">
+                                ${attachment.size ? `<span>${Utils.escapeHtml(attachment.size)}</span>` : ''}
+                                ${isProtected ? `<span class="xjtu-label">${Icons.render('lock', 12)}私有版权保护</span>` : ''}
                             </div>
-                            <div style="font-size: 11px; color: #999;">
-                                ${attachment.size ? `📦 ${Utils.escapeHtml(attachment.size)}` : ''}
-                            </div>
-                            ${attachment.error ? `<div style="font-size: 10px; color: ${Theme.colors.error};">❌ ${Utils.escapeHtml(attachment.error)}</div>` : ''}
-                        </div>
-                        <div style="margin-left: 10px;">
-                            ${attachment.hasDownload
-                                ? `<button class="download-single-btn" data-index="${dataIndex}"
-                                           style="background: ${Theme.colors.success}; color: white;
-                                                  border: none; padding: 4px 8px; border-radius: 3px;
-                                                  cursor: pointer; font-size: 11px;">⬇ 下载</button>`
-                                : `<span style="color: ${Theme.colors.error}; font-size: 11px;">❌</span>`
-                            }
-                        </div>
+                        ` : ''}
+                        ${attachment.error ? `<div class="xjtu-list-error">${Icons.render('error', 14)}${Utils.escapeHtml(attachment.error)}</div>` : ''}
                     </div>
+                    <button type="button" class="download-single-btn xjtu-icon-btn xjtu-icon-btn-tonal" data-index="${dataIndex}"
+                            title="下载" aria-label="下载 ${Utils.escapeHtml(displayName)}"
+                            ${attachment.hasDownload ? '' : 'disabled'}>${Icons.render('download', 20)}</button>
                 </div>
             `;
+        },
+
+        // 渲染文件类型标识
+        renderFileBadge(fileName) {
+            const match = fileName?.match(/\.([a-z0-9]{1,4})$/i);
+            return `<div class="xjtu-file-badge">${match ? match[1].toUpperCase() : Icons.render('file')}</div>`;
         },
 
         // 渲染面板底部
         renderPanelFooter(stats) {
             return `
-                <div style="padding: 15px; border-top: 1px solid ${Theme.colors.gray}; background: ${Theme.colors.lightGray};">
-                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-                        <button id="download-all-btn" style="flex: 1; background: ${Theme.colors.success}; color: white;
-                                border: none; padding: 12px; border-radius: 6px; cursor: pointer;
-                                font-size: 14px; font-weight: bold;">⬇ 下载全部 (${stats.downloadableCount})</button>
-                        <button id="copy-all-btn" style="flex: 1; background: ${Theme.colors.primary}; color: white;
-                                border: none; padding: 12px; border-radius: 6px; cursor: pointer;
-                                font-size: 14px; font-weight: bold;">📋 复制链接</button>
-                    </div>
+                <div class="xjtu-sheet-footer">
                     ${stats.noPermissionCount > 0 ? `
-                        <div style="font-size: 11px; color: ${Theme.colors.warning}; text-align: center;">
-                            ⚠️ ${stats.noPermissionCount} 个课件通过技术手段获取，请合理使用
-                        </div>
+                        <div class="xjtu-note">${Icons.render('info', 16)}<span>${stats.noPermissionCount} 个课件通过技术手段获取，请合理使用</span></div>
                     ` : ''}
+                    <div class="xjtu-actions">
+                        <button type="button" id="copy-all-btn" class="xjtu-btn xjtu-btn-outlined">${Icons.render('copy', 18)}复制链接</button>
+                        <button type="button" id="download-all-btn" class="xjtu-btn xjtu-btn-filled"
+                                ${stats.downloadableCount > 0 ? '' : 'disabled'}>${Icons.render('download', 18)}下载全部 (${stats.downloadableCount})</button>
+                    </div>
                 </div>
             `;
         },
@@ -918,6 +1372,7 @@
             if (DOMHelper.find('#xjtu-main-button')) {
                 return;
             }
+            UIManager.injectStyles();
             this.mainButton = UIManager.createMainButton(() => this.fetch());
             document.body.appendChild(this.mainButton);
         },
@@ -930,7 +1385,7 @@
             }
 
             this.isProcessing = true;
-            UIManager.updateMainButton(this.mainButton, '⏳ 正在获取课件...', true);
+            UIManager.updateMainButton(this.mainButton, '正在获取课件...', true);
 
             try {
                 if (Utils.isLearningActivityPage()) {
@@ -947,7 +1402,7 @@
                 UIManager.showNotification('获取课件失败: ' + error.message, 'error');
             } finally {
                 this.isProcessing = false;
-                UIManager.updateMainButton(this.mainButton, '📥 获取课件下载链接', false);
+                UIManager.updateMainButton(this.mainButton, CONSTANTS.MAIN_BUTTON_LABEL, false);
             }
         },
 
@@ -968,7 +1423,7 @@
             for (let i = 0; i < containers.length; i++) {
                 UIManager.updateMainButton(
                     this.mainButton,
-                    `⏳ 正在获取课件... (${i + 1}/${containers.length})`,
+                    `正在获取课件... (${i + 1}/${containers.length})`,
                     true
                 );
 
