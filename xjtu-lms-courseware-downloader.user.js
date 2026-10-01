@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         西安交大LMS课件下载器
 // @namespace    https://github.com/WindustH/xjtu-lms-courseware-downloader
-// @version      6.0.1
+// @version      6.1.0
 // @description  自动下载西安交通大学LMS系统的课件文件，支持所有课件（包括无下载权限和时效性token的文件）
 // @author       WindustH
 // @match        https://lms.xjtu.edu.cn/course/*/courseware*
+// @match        https://lms.xjtu.edu.cn/course/*/learning-activity*
 // @run-at       document-end
 // @license MIT
 // ==/UserScript==
@@ -17,7 +18,7 @@
     // ============================================
 
     const CONSTANTS = {
-        VERSION: '6.0.1',
+        VERSION: '6.1.0',
         SCRIPT_NAME: 'LMS下载器',
 
         // DOM 选择器
@@ -40,8 +41,7 @@
             NOTIFICATION_DURATION: 3000,
             DOWNLOAD_INTERVAL: 1500,
             PAGE_READY: 30000,
-            ANGULAR_DATA: 10000,
-            DOCUMENT_URL: 5000
+            ANGULAR_DATA: 10000
         },
 
         // 轮询间隔 (ms)
@@ -89,22 +89,38 @@
             return match ? match[1] : null;
         },
 
+        // 是否为课件页
+        isCoursewarePage() {
+            return window.location.pathname.includes('/courseware');
+        },
+
+        // 是否为学习活动页
+        isLearningActivityPage() {
+            return window.location.pathname.includes('/learning-activity');
+        },
+
+        // 获取学习活动 ID (learning-activity#/1424648)
+        getActivityId() {
+            const match = window.location.hash.match(/^#\/(\d+)/);
+            return match ? match[1] : null;
+        },
+
+        // 格式化文件大小
+        formatSize(bytes) {
+            if (typeof bytes !== 'number') return '';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let size = bytes;
+            let i = 0;
+            while (size >= 1024 && i < units.length - 1) {
+                size /= 1024;
+                i++;
+            }
+            return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+        },
+
         // 延迟
         delay(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
-        },
-
-        // 轮询
-        async poll(fn, condition, timeout, interval) {
-            const startTime = Date.now();
-            while (Date.now() - startTime < timeout) {
-                const result = fn();
-                if (condition(result)) {
-                    return result;
-                }
-                await this.delay(interval);
-            }
-            throw new Error(`轮询超时: ${timeout}ms`);
         },
 
         // 等待元素
@@ -272,48 +288,24 @@
             throw new Error('Angular 数据加载超时');
         },
 
-        // 获取文档 URL
-        async fetchDocumentUrl(attachmentRow) {
-            attachmentRow.click();
-
-            try {
-                const updatedInfo = await Utils.poll(
-                    () => this.getUploadInfo(attachmentRow),
-                    (info) => info?.documentUrl && info.documentUrl.includes('file='),
-                    CONSTANTS.TIMEOUTS.DOCUMENT_URL,
-                    CONSTANTS.POLL_INTERVAL.FAST
-                );
-
-                if (updatedInfo?.documentUrl) {
-                    const match = updatedInfo.documentUrl.match(/[?&]file=([^&]+)/);
-                    if (match) {
-                        return decodeURIComponent(match[1]);
-                    }
-                }
-            } catch (e) {
-                Logger.error('获取文档 URL 超时:', e.message);
+        // 请求 JSON 接口
+        async fetchJson(url) {
+            const response = await fetch(url, { credentials: 'same-origin' });
+            if (!response.ok) {
+                throw new Error(`请求失败 (${response.status}): ${url}`);
             }
-
-            return null;
+            return response.json();
         },
 
-        // 关闭预览窗口
-        closePreview() {
-            const selectors = [
-                '.modal-header .close',
-                '.modal-footer .btn-default',
-                '[ng-click*="close"]',
-                '[ng-click*="cancel"]'
-            ];
+        // 获取学习活动详情（含附件列表）
+        fetchActivity(activityId) {
+            return this.fetchJson(`/api/activities/${activityId}`);
+        },
 
-            for (const selector of selectors) {
-                const btn = DOMHelper.find(selector);
-                if (btn) {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
+        // 获取原始文件的限时下载链接（无下载权限的文件也可用）
+        async fetchUploadUrl(uploadId) {
+            const data = await this.fetchJson(`/api/uploads/${uploadId}/url`);
+            return data?.url || null;
         }
     };
 
@@ -430,6 +422,37 @@
             return `/api/uploads/reference/${id}/blob`;
         },
 
+        // 获取学习活动的附件（学习活动页）
+        async collectActivity(activityId) {
+            const activity = await DataProvider.fetchActivity(activityId);
+            const itemInfo = {
+                name: activity.title || '未命名课件',
+                module: '',
+                size: ''
+            };
+
+            const uploads = (activity.uploads || []).filter(upload => !upload.deleted);
+            if (uploads.length === 0) {
+                return {
+                    ...itemInfo,
+                    attachments: [{
+                        ...itemInfo,
+                        fileName: '',
+                        downloadUrl: null,
+                        hasDownload: false,
+                        error: '未找到附件'
+                    }]
+                };
+            }
+
+            const attachments = uploads.map(upload => this.createAttachment(itemInfo, {
+                fileName: upload.name,
+                fileSize: Utils.formatSize(upload.size),
+                uploadInfo: upload
+            }));
+            return { ...itemInfo, attachments };
+        },
+
         // 获取新的下载链接
         async fetchFreshDownloadUrl(uploadId) {
             for (let attempt = 0; attempt <= CONSTANTS.RETRY.FETCH_URL; attempt++) {
@@ -438,18 +461,13 @@
                     await Utils.delay(500);
                 }
 
-                const rows = Array.from(this.getAttachmentRows(document));
-                for (const row of rows) {
-                    const uploadInfo = DataProvider.getUploadInfo(row);
-                    if (uploadInfo?.id === uploadId) {
-                        const url = await DataProvider.fetchDocumentUrl(row);
-                        DataProvider.closePreview();
-
-                        if (url) {
-                            return url;
-                        }
-                        break;
+                try {
+                    const url = await DataProvider.fetchUploadUrl(uploadId);
+                    if (url) {
+                        return url;
                     }
+                } catch (e) {
+                    Logger.warn('获取下载链接出错:', e.message);
                 }
             }
 
@@ -769,11 +787,12 @@
                 }
 
                 // 创建下载链接
+                // 不使用 target=_blank：跨域链接 (media.xjtu.edu.cn) 会打开新标签页，
+                // 批量下载时失去用户手势而被弹窗拦截；服务器返回 Content-Disposition: attachment，当前页不会跳转
                 const a = DOMHelper.create('a', {
                     attributes: {
                         href: url,
-                        download: safeName,
-                        target: '_blank'
+                        download: safeName
                     },
                     style: 'display: none'
                 });
@@ -803,16 +822,21 @@
             }
         },
 
-        // 复制链接
-        copyLinks(coursewareGroups) {
-            const links = [];
-            coursewareGroups.forEach(group => {
-                group.attachments.forEach(attachment => {
-                    if (attachment.hasDownload && attachment.downloadUrl) {
-                        links.push(`[${group.name}] ${attachment.fileName || attachment.name}: ${attachment.downloadUrl}`);
-                    }
-                });
-            });
+        // 复制链接（无下载权限的文件实时获取限时链接）
+        async copyLinks(coursewareGroups) {
+            const entries = coursewareGroups.flatMap(group =>
+                group.attachments
+                    .filter(attachment => attachment.hasDownload)
+                    .map(attachment => ({ group, attachment }))
+            );
+
+            const lines = await Promise.all(entries.map(async ({ group, attachment }) => {
+                const url = attachment.needsFreshUrl && attachment.uploadId
+                    ? await CoursewareService.fetchFreshDownloadUrl(attachment.uploadId)
+                    : attachment.downloadUrl;
+                return url ? `[${group.name}] ${attachment.fileName || attachment.name}: ${url}` : null;
+            }));
+            const links = lines.filter(Boolean);
 
             navigator.clipboard.writeText(links.join('\n'))
                 .then(() => UIManager.showNotification(`链接已复制到剪贴板 (${links.length} 个文件)`, 'success'))
@@ -831,7 +855,14 @@
 
         // 初始化
         init() {
-            if (!window.location.pathname.includes('/courseware')) {
+            // 学习活动页通过 API 获取附件，无需等待课件列表
+            if (Utils.isLearningActivityPage()) {
+                this.setup();
+                Logger.info(`v${CONSTANTS.VERSION} 已启动 (学习活动页)`);
+                return;
+            }
+
+            if (!Utils.isCoursewarePage()) {
                 return;
             }
 
@@ -902,25 +933,10 @@
             UIManager.updateMainButton(this.mainButton, '⏳ 正在获取课件...', true);
 
             try {
-                const containers = DOMHelper.findAll(CONSTANTS.SELECTORS.COURSEWARE_ITEM);
-                this.coursewareData = [];
-
-                for (let i = 0; i < containers.length; i++) {
-                    UIManager.updateMainButton(
-                        this.mainButton,
-                        `⏳ 正在获取课件... (${i + 1}/${containers.length})`,
-                        true
-                    );
-
-                    await CoursewareService.expandItem(containers[i]);
-                    await DataProvider.waitForAngularData(
-                        containers[i],
-                        CoursewareService.getAttachmentRows.bind(CoursewareService)
-                    );
-
-                    const info = CoursewareService.getItemInfo(containers[i]);
-                    const attachments = await CoursewareService.collectAttachments(containers[i]);
-                    this.coursewareData.push({ ...info, attachments });
+                if (Utils.isLearningActivityPage()) {
+                    await this.fetchActivity();
+                } else {
+                    await this.fetchCourseware();
                 }
 
                 this.showPanel();
@@ -932,6 +948,39 @@
             } finally {
                 this.isProcessing = false;
                 UIManager.updateMainButton(this.mainButton, '📥 获取课件下载链接', false);
+            }
+        },
+
+        // 获取当前学习活动的附件
+        async fetchActivity() {
+            const activityId = Utils.getActivityId();
+            if (!activityId) {
+                throw new Error('未找到当前学习活动');
+            }
+            this.coursewareData = [await CoursewareService.collectActivity(activityId)];
+        },
+
+        // 获取课件页所有课件项
+        async fetchCourseware() {
+            const containers = DOMHelper.findAll(CONSTANTS.SELECTORS.COURSEWARE_ITEM);
+            this.coursewareData = [];
+
+            for (let i = 0; i < containers.length; i++) {
+                UIManager.updateMainButton(
+                    this.mainButton,
+                    `⏳ 正在获取课件... (${i + 1}/${containers.length})`,
+                    true
+                );
+
+                await CoursewareService.expandItem(containers[i]);
+                await DataProvider.waitForAngularData(
+                    containers[i],
+                    CoursewareService.getAttachmentRows.bind(CoursewareService)
+                );
+
+                const info = CoursewareService.getItemInfo(containers[i]);
+                const attachments = await CoursewareService.collectAttachments(containers[i]);
+                this.coursewareData.push({ ...info, attachments });
             }
         },
 
